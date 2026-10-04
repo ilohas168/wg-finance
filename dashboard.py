@@ -306,19 +306,8 @@ else:  # Product Analytics
             raise RuntimeError("No Google Sheets credentials configured.")
 
     except Exception:
-        # Demo / fallback data.
-        _demo_rows = [
-            ["2026-09-01", "Edeka", "Milk", 3.50, 2],
-            ["2026-09-01", "Edeka", "Bread", 2.75, 1],
-            ["2026-09-08", "Rewe", "Coffee", 4.20, 1],
-            ["2026-09-15", "Aldi", "Eggs", 3.10, 2],
-            ["2026-09-22", "Edeka", "Milk", 3.60, 3],
-            ["2026-10-01", "Rewe", "Butter", 1.80, 1],
-            ["2026-10-02", "Aldi", "Coffee", 4.50, 1],
-            ["2026-10-02", "Edeka", "Milk", 3.60, 2],
-        ]
-        _demo_cols = ["date", "merchant", "item_name", "price", "qty"]
-        df_hist = pd.DataFrame(_demo_rows, columns=_demo_cols)
+        # No Google Sheets data available — show an empty frame.
+        df_hist = pd.DataFrame(columns=["date", "merchant", "item_name", "price", "qty"])
 
     # ------------------------------------------------------------------ #
     # Filtering                                                            #
