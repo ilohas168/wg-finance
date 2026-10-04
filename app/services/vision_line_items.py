@@ -37,8 +37,8 @@ class LineItem(BaseModel):
     )
     qty: int = Field(default=1, description="Quantity of the item.")
     category: str = Field(
-        default="",
-        description="Category tag such as 'Food', 'Drink', 'Toiletries', 'Household' or '' when unknown.",
+        default="General",
+        description="Category tag: Food, Drink, Toiletries, Household, General — never null or empty.",
     )
 
 
@@ -68,12 +68,22 @@ _SYSTEM_PROMPT: str = (
     "Extract every line-item from this receipt image into structured JSON.\n\n"
     "**You MUST output valid, parseable JSON only — no markdown fences,**\n"
     "**explanations, or text outside the JSON object.**\n\n"
+
+    "--- Swiss Receipt Rules (Coop / Migros / Aldi / Lidl etc.) ---\n"
+    "Swiss receipts use a column layout:\n"
+    "  `Artikel` (Name) | `Menge` (Qty/Weight) | `Preis` (Unit Price) | `Aktion` (Discount) | `Total` (Line Total)\n\n"
+    "- ALWAYS use the **rightmost `Total`** column as the line item `price`.\n"
+    "- For decimal weights in `Menge` (e.g. `0.420 kg`), set `qty = 1` and `price = Total`.\n"
+    "- Swiss trailing minus signs indicate negatives: `"3.60-"` → `-3.60`.\n"
+    "- Items like `Rabatt`, `Aktion`, `Sonderpreis` are **discounts** — their price MUST be negative (e.g. `-3.60`).\n"
+    "- Always assign every item a non-empty `category`: one of `Food`, `Drink`, `Toiletries`, `Household`, `General`.\n"
+
     "Each item must have:\n"
     '  - "name": short descriptive name (<=60 chars)\n'
     '  - "price": number — positive for regular charges; negative for discounts,\n'
     '                deductions, and vouchers (e.g. -3.60 for Rabatt/Pfand)\n'
     '  - "qty": integer quantity (default 1 when not visible)\n'
-    '  - "category": one of Food, Drink, Toiletries, Household, Other — or "" if unsure\n\n'
+    '  - "category": one of Food, Drink, Toiletries, Household, General — NEVER null or empty.\n\n'
     "Rules:\n"
     '  - date must be YYYY-MM-DD (guess from visual cues if absent).\n'
     '  - tax_total is the total tax line (0 if not listed).\n\n'
@@ -84,7 +94,7 @@ _SYSTEM_PROMPT: str = (
     '  "total_amount": 14.74,\n'
     '  "items": [\n'
     '    {"name": "Milk", "price": 3.50, "qty": 2, "category": "Drink"},\n'
-    '    {"name": "Rabatt", "price": -1.20, "qty": 1, "category": ""}\n'
+    '    {"name": "Rabatt", "price": -1.20, "qty": 1, "category": "General"}\n'
     "  ]\n"
     "}\n"
 )

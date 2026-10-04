@@ -190,6 +190,13 @@ if st.session_state.current_page == "Upload & Edit Receipt":
 
         if save_clicked and edited_df is not None and not edited_df.empty:
             try:
+                # ------------------------------------------------------------------ #
+                # Clean the DataFrame: fill NaN, ensure clean Python types.          #
+                # ------------------------------------------------------------------ #
+                df_clean = edited_df.copy()
+                df_clean["Category"] = df_clean["Category"].fillna("General").astype(str)
+                df_clean = df_clean.fillna("")
+
                 from app.services.ledger import append_transactions, append_line_items
                 from app.models import LedgerEntry, SplitType
                 from datetime import date as _date
@@ -208,27 +215,36 @@ if st.session_state.current_page == "Upload & Edit Receipt":
                     if st.session_state.parsed_dict.get("date"):
                         parsed_date = st.session_state.parsed_dict["date"]
 
-                for _, row in edited_df.iterrows():  # type: ignore[possibly-scalar-assignment]
+                for _, row in df_clean.iterrows():  # type: ignore[possibly-scalar-assignment]
+                    _price_raw = row["price"]
+                    _name_raw = str(row["name"]) if pd.notna(row["name"]) else ""
+
                     entries.append(
                         LedgerEntry(
                             date=parsed_date,
                             payer_phone="",
                             payer_name=st.session_state.selected_user,
                             merchant=parsed_merchant,
-                            item_name=str(row["name"]),  # type: ignore[arg-type]
-                            price=float(row["price"]),
+                            item_name=_name_raw,
+                            price=float(_price_raw),
                             split_category=SplitType.SPLIT_3 if row["is_shared"] else SplitType.ONLY_A,  # type: ignore[arg-type]
                         )
                     )
                     line_items.append({
-                        "name": str(row["name"]),
-                        "price": float(row["price"]),
-                        "qty": int(row["qty"]),
-                        "category": str(row["category"]),
+                        "name": _name_raw,
+                        "price": float(_price_raw) if pd.notna(_price_raw) else 0.0,
+                        "qty": int(row["qty"]) if pd.notna(row["qty"]) else 1,
+                        "category": str(row["Category"]) if pd.notna(row["Category"]) else "General",
                         "is_shared": bool(row["is_shared"]),
                     })
 
-                # Write summary ledger (Transactions sheet).
+                # Write summary ledger (Transactions sheet) — run async safely.
+                try:
+                    import nest_asyncio as _na
+                    _na.apply()  # allow asyncio.run inside Streamlit's event loop
+                except ImportError:
+                    pass  # nest_asyncio not installed; asyncio.run may work anyway
+
                 saved_summary_count = asyncio.run(append_transactions(entries))
 
                 # Write itemised breakdown (Receipt_Items sheet).
@@ -248,8 +264,7 @@ if st.session_state.current_page == "Upload & Edit Receipt":
                 st.success(msg)
 
             except Exception as exc:
-                st.toast("❌ Save failed", icon="❌")
-                st.session_state.save_status = str(exc)
+                st.error(f"Error saving to Sheets: {str(exc)}")
 
     elif st.session_state.has_parsed and (st.session_state.raw_items_df is None or st.session_state.raw_items_df.empty):
         st.warning("Parsed receipt returned no items. Please add them manually.")
