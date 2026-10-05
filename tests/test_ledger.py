@@ -14,8 +14,8 @@ from app.models import (
     split_ratios,
 )
 
-# calculate_split is in the ledger service; import here for tests.
-from app.services.ledger import calculate_split  # noqa: F401
+# calculate_split moved to app/models alongside split_ratios and compute_bearings.
+from app.models import calculate_split
 
 
 # ------------------------------------------------------------------ #

@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Literal
 
 import groq
 from groq import NotFoundError
@@ -40,11 +40,17 @@ class LineItem(BaseModel):
         default="General",
         description="Category tag: Food, Drink, Toiletries, Household, General — never null or empty.",
     )
+    discount: float = Field(default=0.0, description="Line-level discount amount. Use negative for discounts.")
+    split_type: Literal["Shared", "Private"] = Field(default="Shared", description="Whether this item is Shared among roommates or Private to specific ones.")
+    beneficiary: str = Field(default="ALL", description="Which roommates benefit: 'A','B','C','AB','BC','AC','ALL'")
 
 
 class ItemizedReceipt(BaseModel):
     """Top-level parsed receipt returned by Groq vision."""
 
+    receipt_id: str = Field(default="", description="Auto-generated receipt ID (REC-YYYYMMDD-HHMMSS).")
+    paid_by: str = Field(default="Roommate 1", description="Who paid this receipt.")
+    header_discounts: float = Field(default=0.0, description="Receipt-level subtotal discount.")
     merchant: str = Field(description="Store / merchant name.")
     date: str = Field(description="Purchase date in YYYY-MM-DD format.")
     total_amount: float = Field(description="Grand total from the receipt footer.")
@@ -74,6 +80,13 @@ _SYSTEM_PROMPT: str = (
     "  `Artikel` (Name) | `Menge` (Qty/Weight) | `Preis` (Unit Price) | `Aktion` (Discount) | `Total` (Line Total)\n\n"
     "- ALWAYS use the **rightmost `Total`** column as the line item `price`.\n"
     "- For decimal weights in `Menge` (e.g. `0.420 kg`), set `qty = 1` and `price = Total`.\n"
+    "--- Split Fields ---\n"
+    "- Each item MUST have `split_type`: either \"Shared\" (cost shared among roommates) or \"Private\" (specific roommate only).\n"
+    '- Default `split_type` is "Shared".\n'
+    "- Each item MUST have `beneficiary`: which roommates benefit — one of \"A\",\"B\",\"C\",\"AB\",\"BC\",\"AC\",\"ALL\".\n"
+    '- Default `beneficiary` is "ALL".\n'
+    '- Line_Total calculation: `(Qty × Unit_Price) − Discount`. The Vision parser should output the line total separately from unit price.\n'
+
     "- Swiss trailing minus signs indicate negatives: `"3.60-"` → `-3.60`.\n"
     "- Items like `Rabatt`, `Aktion`, `Sonderpreis` are **discounts** — their price MUST be negative (e.g. `-3.60`).\n"
     "- Always assign every item a non-empty `category`: one of `Food`, `Drink`, `Toiletries`, `Household`, `General`.\n"
@@ -83,7 +96,12 @@ _SYSTEM_PROMPT: str = (
     '  - "price": number — positive for regular charges; negative for discounts,\n'
     '                deductions, and vouchers (e.g. -3.60 for Rabatt/Pfand)\n'
     '  - "qty": integer quantity (default 1 when not visible)\n'
-    '  - "category": one of Food, Drink, Toiletries, Household, General — NEVER null or empty.\n\n'
+    '  - "category": one of Food, Drink, Toiletries, Household, General — NEVER null or empty.\n'
+    '  - "discount": line-level discount amount (0.0 when none). For Rabatt/Aktion lines this should be positive (e.g. 1.20).\n'
+    '  - "split_type": "Shared" or "Private" — default "Shared".\n'
+    '  - "beneficiary": one of "A","B","C","AB","BC","AC","ALL" — default "ALL".\n\n'
+    "Receipt-level fields:\n"
+    '- `header_discounts`: receipt-wide subtotal discount (default 0.0).\n\n'
     "Rules:\n"
     '  - date must be YYYY-MM-DD (guess from visual cues if absent).\n'
     '  - tax_total is the total tax line (0 if not listed).\n\n'
@@ -92,9 +110,10 @@ _SYSTEM_PROMPT: str = (
     '  "merchant": "store name",\n'
     '  "date": "2026-10-03",\n'
     '  "total_amount": 14.74,\n'
+    '  "header_discounts": 0.0,\n'
     '  "items": [\n'
-    '    {"name": "Milk", "price": 3.50, "qty": 2, "category": "Drink"},\n'
-    '    {"name": "Rabatt", "price": -1.20, "qty": 1, "category": "General"}\n'
+    '    {"name": "Milk", "price": 3.50, "qty": 2, "category": "Drink", "discount": 0.0, "split_type": "Shared", "beneficiary": "ALL"},\n'
+    '    {"name": "Rabatt", "price": -1.20, "qty": 1, "category": "General", "discount": 1.20, "split_type": "Shared", "beneficiary": "ALL"}\n'
     "  ]\n"
     "}\n"
 )

@@ -1,21 +1,22 @@
-"""Streamlit dashboard for WG Sharehouse — upload, edit, and analyse receipts.
+"""Streamlit dashboard for WG Sharehouse — upload, edit, balances, and reports.
 
 Pages:
-  1. **Upload & Edit Receipt** — upload / camera-capture a receipt, parse with Groq
-     vision, edit line-items in-place, then save to Google Sheets.
-  2. **Product Analytics** — search historical item purchases and view monthly quantity
-     charts from the shared ledger (Google Sheets).
+  1. **Upload Receipt** — upload / camera-capture a receipt, parse with Groq
+     vision, edit line-items in-place, then save to Google Sheets (new schema).
+  2. **Edit History** — browse historical receipts, edit line-items, resave.
+  3. **Balances & Settlements** — per-roommate balances, who-owes-whom matrix,
+     settlement tracking.
+  4. **Parent Reports** — filtered expense history with total-spent metric and CSV export.
 """
 
 from __future__ import annotations
 
-import json
 import io
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 
 # --------------------------------------------------------------------------- #
 # Page config                                                                  #
@@ -28,15 +29,16 @@ st.set_page_config(page_title="WG Sharehouse Hub", layout="wide", page_icon="")
 # --------------------------------------------------------------------------- #
 
 _DEFAULT_ROOMMATES = ["Roommate 1", "Roommate 2", "Roommate 3"]
+_ROOMMATE_INITIALS = {"Roommate 1": "A", "Roommate 2": "B", "Roommate 3": "C"}
 
 
 def _init_session() -> None:
     """Ensure all required keys exist in ``st.session_state``."""
     defaults = {
         "selected_user": "Roommate 1",
-        "current_page": "Upload & Edit Receipt",
-        "raw_items_df": None,       # pandas DataFrame from vision parser
-        "parsed_dict": None,        # raw dict returned by parse_itemized_receipt
+        "current_tab": "Upload Receipt",
+        "raw_items_df": None,
+        "parsed_dict": None,
         "has_parsed": False,
         "save_status": "",
     }
@@ -52,22 +54,28 @@ _init_session()
 # --------------------------------------------------------------------------- #
 
 with st.sidebar:
-    st.header("Settings")
-
-    user_sel = st.radio(
+    st.title("WG Sharehouse Hub")
+    st.divider()
+    today = date.today()
+    default_start = today.replace(day=1) if today.day > 1 else today - __import__("datetime").timedelta(days=today.day - 1)
+    date_range = st.date_input(
+        "Date Range",
+        value=(default_start, today),
+        key="date_range_picker",
+    )
+    selected_user = st.radio(
         "Viewing as",
         options=_DEFAULT_ROOMMATES,
         index=_DEFAULT_ROOMMATES.index(st.session_state.selected_user) if st.session_state.selected_user in _DEFAULT_ROOMMATES else 0,
         key="selected_user",
     )
-
     st.divider()
-
-    page_sel = st.radio(
+    tabs = ["Upload Receipt", "Edit History", "Balances & Settlements", "Parent Reports"]
+    selected_tab = st.radio(
         "Page",
-        options=["Upload & Edit Receipt", "Product Analytics"],
-        index=["Upload & Edit Receipt", "Product Analytics"].index(st.session_state.current_page),
-        key="current_page",
+        options=tabs,
+        index=tabs.index(st.session_state.current_tab) if st.session_state.current_tab in tabs else 0,
+        key="current_tab",
     )
 
 # --------------------------------------------------------------------------- #
@@ -75,56 +83,103 @@ with st.sidebar:
 # --------------------------------------------------------------------------- #
 
 
-def _load_items_df(raw_dict: Optional[dict]) -> pd.DataFrame:
-    """Build an editable DataFrame from the vision parser output dict."""
-    if raw_dict is None or not raw_dict.get("items"):
-        return pd.DataFrame(columns=["name", "price", "qty", "category", "is_shared"])
+def _get_roommate_label(user: str) -> str:
+    """Get the initial (A/B/C) for a roommate."""
+    return _ROOMMATE_INITIALS.get(user, "X")
 
-    rows = []
-    for item in raw_dict["items"]:
-        rows.append({
-            "name": item.get("name", ""),
-            "price": item.get("price", 0.0),
-            "qty": int(item.get("qty", 1)),
-            "category": item.get("category", ""),
-            "is_shared": True,
-        })
-    df = pd.DataFrame(rows, columns=["name", "price", "qty", "category", "is_shared"])
-    # Ensure bool dtype.
-    df["is_shared"] = df["is_shared"].astype(bool)
+
+def _clean_df_for_sheets(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill NaN values for Google Sheets compatibility.
+
+    - String / object columns → ""
+    - Numeric columns → 0
+    """
+    df = df.copy()
+    # Fill string/object cols with ""
+    str_cols = df.select_dtypes(include=["object"]).columns.tolist()
+    for col in str_cols:
+        df[col] = df[col].fillna("").astype(str)
+    # Fill numeric cols with 0
+    num_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    for col in num_cols:
+        df[col] = df[col].fillna(0).astype(float)
     return df
 
 
-def _summarise_receipt(df: pd.DataFrame) -> Dict[str, float]:
+def _compute_line_totals(df: pd.DataFrame) -> pd.Series:
+    """Compute Line_Total = Qty * Unit_Price - Discount."""
+    qty = df.get("Qty", pd.Series([1] * len(df)))
+    price = df.get("Unit_Price", pd.Series([0] * len(df)))
+    discount = df.get("Discount", pd.Series([0] * len(df)))
+    return (qty.astype(float)) * (price.astype(float)) - (discount.astype(float))
+
+
+def _load_items_df(raw_dict: Optional[dict]) -> pd.DataFrame:
+    """Build an editable DataFrame from the vision parser output dict."""
+    if raw_dict is None or not raw_dict.get("items"):
+        return pd.DataFrame(columns=["Product_Name", "Category", "Qty", "Unit_Price", "Discount", "Line_Total", "Split_Type", "Beneficiary"])
+
+    rows = []
+    for item in raw_dict.get("items", []):
+        qty = int(item.get("qty", 1))
+        price = float(item.get("price", 0.0))
+        discount = float(item.get("discount", 0.0))
+        line_total = qty * price - discount
+        rows.append({
+            "Product_Name": item.get("name", ""),
+            "Category": item.get("category", "General"),
+            "Qty": qty,
+            "Unit_Price": price,
+            "Discount": discount,
+            "Line_Total": line_total,
+            "Split_Type": item.get("split_type", "Shared"),
+            "Beneficiary": item.get("beneficiary", "ALL"),
+        })
+    df = pd.DataFrame(rows)
+    for col in ["Qty", "Unit_Price", "Discount", "Line_Total"]:
+        if col in df.columns:
+            df[col] = df[col].astype(float)
+    return df
+
+
+def _summarise_receipt(df: pd.DataFrame, header_discounts: float) -> Dict[str, float]:
     """Calculate shared/personal totals from the DataFrame."""
     if df.empty:
-        return {"shared_total": 0.0, "per_roommate_share": 0.0, "personal_total": 0.0}
+        return {
+            "shared_total": 0.0,
+            "per_roommate_share": 0.0,
+            "personal_total": 0.0,
+            "grand_total": header_discounts,
+        }
 
-    shared_mask = df["is_shared"] == True  # noqa: E712 — explicit bool comparison
-    personal_mask = df["is_shared"] == False  # noqa: E712
+    shared_mask = df["Split_Type"] == "Shared"
+    private_mask = df["Split_Type"] == "Private"
 
-    shared_total = float((df.loc[shared_mask, "price"] * df.loc[shared_mask, "qty"]).sum())
-    personal_total = float((df.loc[personal_mask, "price"] * df.loc[personal_mask, "qty"]).sum())
+    shared_total = float(df.loc[shared_mask, "Line_Total"].sum()) if shared_mask.any() else 0.0
+    personal_total = float(df.loc[private_mask, "Line_Total"].sum()) if private_mask.any() else 0.0
+    grand_total = round(shared_total + abs(personal_total) + header_discounts, 2)
+
+    # Per-roommate share of shared pool: divide by number of beneficiaries
     per_roommate_share = round(shared_total / 3.0, 2)
 
     return {
         "shared_total": round(abs(shared_total), 2),
         "per_roommate_share": abs(per_roommate_share),
         "personal_total": round(abs(personal_total), 2),
+        "grand_total": grand_total,
     }
 
 
-# --------------------------------------------------------------------------- #
-# Page 1 — Upload & Edit Receipt                                             #
-# --------------------------------------------------------------------------- #
+# =========================================================================== #
+# Tab 1 — Upload Receipt                                                     #
+# =========================================================================== #
 
-if st.session_state.current_page == "Upload & Edit Receipt":
-    st.title("Upload & Edit Receipt")
+if selected_tab == "Upload Receipt":
+    st.title("Upload Receipt")
     st.caption("Send a receipt photo, edit line-items, and save to the shared ledger.")
 
-    left, right = st.columns(2)
-    uploaded_file = left.file_uploader("Upload receipt image", type=["png", "jpg", "jpeg"], key="file_uploader")
-    camera_img = right.camera_input("Or take a photo", key="camera_input")
+    uploaded_file = st.file_uploader("Upload receipt image", type=["png", "jpg", "jpeg"], key="file_uploader")
+    camera_img = st.camera_input("Or take a photo", key="camera_input")
 
     # Determine source bytes.
     image_bytes: Optional[bytes] = None
@@ -150,38 +205,62 @@ if st.session_state.current_page == "Upload & Edit Receipt":
             st.error(f"Failed to parse receipt: {exc}")
 
     # Edit area & summary.
-    if st.session_state.has_parsed and st.session_state.raw_items_df is not None:
+    if st.session_state.has_parsed and st.session_state.raw_items_df is not None and not st.session_state.raw_items_df.empty:
+        df = st.session_state.raw_items_df.copy()
+        df["Line_Total"] = _compute_line_totals(df)
+        st.session_state.raw_items_df = df
+
         st.subheader("Line-items")
+        col_config = {
+            "Product_Name": st.column_config.TextColumn("Name", width="medium"),
+            "Category": st.column_config.DropdownColumn(
+                "Category",
+                options=["Food", "Drink", "Toiletries", "Household", "General"],
+                width="small",
+            ),
+            "Qty": st.column_config.NumberColumn("Qty", min_value=0, step=1, width="small"),
+            "Unit_Price": st.column_config.NumberColumn("Unit Price", format="%.2f", width="small"),
+            "Discount": st.column_config.NumberColumn("Discount", format="%.2f", width="small"),
+            "Split_Type": st.column_config.SelectboxColumn(
+                "Split",
+                options=["Shared", "Private"],
+                width="small",
+            ),
+            "Beneficiary": st.column_config.SelectboxColumn(
+                "Beneficiary",
+                options=["ALL", "A", "B", "C", "AB", "BC", "AC"],
+                width="small",
+            ),
+        }
+
         edited_df = st.data_editor(
-            st.session_state.raw_items_df,
-            column_config={
-                "name": st.column_config.TextColumn("Name", width="medium"),
-                "price": st.column_config.NumberColumn("Price", format="%.2f", width="small"),
-                "qty": st.column_config.NumberColumn("Qty", min_value=0, step=1, width="small"),
-                "category": st.column_config.TextColumn("Category", width="medium"),
-                "is_shared": st.column_config.CheckboxColumn(
-                    "Shared?",
-                    help="Check if this item is shared among all roommates.",
-                    default=True,
-                ),
-            },
+            df,
+            column_config=col_config,
+            column_order=list(col_config.keys()),
             hide_index=True,
             use_container_width=True,
             key="items_editor",
         )
 
         # Re-capture edits into session state.
+        for col in ["Qty", "Unit_Price", "Discount"]:
+            if col in edited_df.columns:
+                edited_df[col] = pd.to_numeric(edited_df[col], errors="coerce").fillna(0)
+        edited_df["Line_Total"] = _compute_line_totals(edited_df)
         st.session_state.raw_items_df = edited_df
 
         # Summary metrics.
-        summary = _summarise_receipt(edited_df)
-        m1, m2, m3 = st.columns(3)
+        header_disc = st.number_input("Header discounts", value=0.0, key="header_discounts_input")
+        summary = _summarise_receipt(edited_df, header_disc)
+        m1, m2, m3, m4 = st.columns(4)
         with m1:
             st.metric("Shared Total", f"${summary['shared_total']:,.2f}")
         with m2:
             st.metric("Per-Roommate Share", f"${summary['per_roommate_share']:,.2f}")
         with m3:
             st.metric("Personal Total", f"${summary['personal_total']:,.2f}")
+        with m4:
+            st.metric("Grand Total", f"${summary['grand_total']:,.2f}")
 
         # Save.
         col_save, _ = st.columns([1, 5])
@@ -190,79 +269,24 @@ if st.session_state.current_page == "Upload & Edit Receipt":
 
         if save_clicked and edited_df is not None and not edited_df.empty:
             try:
-                # ------------------------------------------------------------------ #
-                # Clean the DataFrame: fill NaN, ensure clean Python types.          #
-                # ------------------------------------------------------------------ #
-                df_clean = edited_df.copy()
-                df_clean["Category"] = df_clean["Category"].fillna("General").astype(str)
-                df_clean = df_clean.fillna("")
+                with st.spinner("Saving to Google Sheets…"):
+                    clean_df = _clean_df_for_sheets(edited_df)
+                    from app.services.ledger import save_receipt  # type: ignore
 
-                from app.services.ledger import append_transactions, append_line_items
-                from app.models import LedgerEntry, SplitType
-                from datetime import date as _date
-                import asyncio
-
-                saved_summary_count = 0
-                saved_line_item_count = 0
-
-                # Build LedgerEntry rows for the summary ledger (Sheet 1: Transactions).
-                entries = []
-                line_items = []
-                parsed_merchant = ""
-                parsed_date = str(_date.today())
-                if st.session_state.parsed_dict:
-                    parsed_merchant = st.session_state.parsed_dict.get("merchant", "")
-                    if st.session_state.parsed_dict.get("date"):
-                        parsed_date = st.session_state.parsed_dict["date"]
-
-                for _, row in df_clean.iterrows():  # type: ignore[possibly-scalar-assignment]
-                    _price_raw = row["price"]
-                    _name_raw = str(row["name"]) if pd.notna(row["name"]) else ""
-
-                    entries.append(
-                        LedgerEntry(
-                            date=parsed_date,
-                            payer_phone="",
-                            payer_name=st.session_state.selected_user,
-                            merchant=parsed_merchant,
-                            item_name=_name_raw,
-                            price=float(_price_raw),
-                            split_category=SplitType.SPLIT_3 if row["is_shared"] else SplitType.ONLY_A,  # type: ignore[arg-type]
-                        )
-                    )
-                    line_items.append({
-                        "name": _name_raw,
-                        "price": float(_price_raw) if pd.notna(_price_raw) else 0.0,
-                        "qty": int(row["qty"]) if pd.notna(row["qty"]) else 1,
-                        "category": str(row["Category"]) if pd.notna(row["Category"]) else "General",
-                        "is_shared": bool(row["is_shared"]),
-                    })
-
-                # Write summary ledger (Transactions sheet) — run async safely.
-                try:
-                    import nest_asyncio as _na
-                    _na.apply()  # allow asyncio.run inside Streamlit's event loop
-                except ImportError:
-                    pass  # nest_asyncio not installed; asyncio.run may work anyway
-
-                saved_summary_count = asyncio.run(append_transactions(entries))
-
-                # Write itemised breakdown (Receipt_Items sheet).
-                saved_line_item_count = append_line_items(
-                    merchant=parsed_merchant,
-                    date=parsed_date,
-                    payer=st.session_state.selected_user,
-                    items=line_items,
-                )
-
-                msg = (
-                    f"Saved **{saved_summary_count}** transaction rows and "
-                    f"**{saved_line_item_count}** line-item rows for "
-                    f"{st.session_state.selected_user}."
-                )
-                st.toast(msg, icon="✅")
-                st.success(msg)
-
+                    receipt_data = {
+                        "Receipt_ID": f"REC-{datetime.now():%Y%m%d-%H%M%S}",
+                        "Date": st.session_state.parsed_dict.get("date", datetime.now().strftime("%Y-%m-%d")),
+                        "Store": st.session_state.parsed_dict.get("merchant", ""),
+                        "Paid_By": selected_user,
+                        "Header_Discounts": header_disc,
+                        "Grand_Total": summary["grand_total"],
+                        "Shared_Total": summary["shared_total"],
+                        "Notes": "",
+                    }
+                    items = clean_df.to_dict(orient="records")
+                    rid = save_receipt(receipt_data, items)
+                st.toast(f"Saved receipt **{rid}**", icon="✅")
+                st.success(f"Receipt **{rid}** saved successfully.")
             except Exception as exc:
                 st.error(f"Error saving to Sheets: {str(exc)}")
 
@@ -270,81 +294,308 @@ if st.session_state.current_page == "Upload & Edit Receipt":
         st.warning("Parsed receipt returned no items. Please add them manually.")
 
 
-# --------------------------------------------------------------------------- #
-# Page 2 — Product Analytics                                                   #
-# --------------------------------------------------------------------------- #
+# =========================================================================== #
+# Tab 2 — Edit History                                                         #
+# =========================================================================== #
 
-else:  # Product Analytics
-    st.title("Product Analytics")
-    st.caption("Search historical item purchases and view monthly quantity trends.")
+elif selected_tab == "Edit History":
+    st.title("Edit History")
+    st.caption("Browse and edit historical receipts.")
 
-    search = st.text_input("Search product name", placeholder="e.g. Milk, Eggs, Coffee …")
-
-    # ------------------------------------------------------------------ #
-    # Fetch data from Google Sheets (or use a demo fallback).             #
-    # ------------------------------------------------------------------ #
     try:
-        _import_gspread = __import__("gspread")
-        _cred = __import__("google.oauth2.service_account", fromlist=["Credentials"]).Credentials  # type: ignore[attr-defined]
-        _creds_path = __import__("os").environ.get("GOOGLE_CREDENTIALS_JSON", "")
+        with st.spinner("Loading receipts…"):
+            from app.services.ledger import get_all_receipts, get_receipt_items  # type: ignore
+            df_receipts = get_all_receipts()
+    except Exception as exc:
+        st.error(f"Failed to load receipts: {exc}")
+        df_receipts = pd.DataFrame(columns=["Receipt_ID", "Date", "Store"])
 
-        if _creds_path and __import__("os").path.isfile(__import__("os").path.expanduser(_creds_path)):
-            creds = _cred.from_service_account_file(
-                __import__("os").path.expanduser(_creds_path),
-                scopes=["https://www.googleapis.com/auth/spreadsheets"],
-            )
-            gc = _import_gspread.authorize(creds)
-            ss = gc.open_by_key(__import__("os").environ.get("GOOGLE_SHEET_ID", ""))
-            ws = ss.worksheet("Transactions")
-            rows = ws.get_all_values()
+    if not df_receipts.empty:
+        receipt_ids = [str(r) for r in df_receipts["Receipt_ID"].tolist()]
+        selected_rid = st.selectbox("Select Receipt", options=receipt_ids, key="edit_receipt_select")
 
-            if rows and len(rows) > 1:
-                df_hist = pd.DataFrame(rows[1:], columns=rows[0])
-            else:
-                df_hist = pd.DataFrame(columns=["date", "merchant", "item_name", "price", "qty"])
-        else:
-            raise RuntimeError("No Google Sheets credentials configured.")
+        if selected_rid:
+            try:
+                with st.spinner("Loading items…"):
+                    from app.services.ledger import get_receipt_items  # type: ignore
+                    df_items = get_receipt_items(selected_rid)
 
-    except Exception:
-        # No Google Sheets data available — show an empty frame.
-        df_hist = pd.DataFrame(columns=["date", "merchant", "item_name", "price", "qty"])
+                if not df_items.empty:
+                    for col in ["Qty", "Unit_Price", "Discount", "Line_Total"]:
+                        if col in df_items.columns:
+                            df_items[col] = pd.to_numeric(df_items[col], errors="coerce").fillna(0)
+                    df_items["Line_Total"] = _compute_line_totals(df_items)
 
-    # ------------------------------------------------------------------ #
-    # Filtering                                                            #
-    # ------------------------------------------------------------------ #
-    if search.strip():
-        df_filtered = df_hist[df_hist["item_name"].str.contains(search, case=False, na=False)]  # type: ignore[attr-defined]
+                    st.subheader("Line-items")
+                    col_config = {
+                        "Product_Name": st.column_config.TextColumn("Name", width="medium"),
+                        "Category": st.column_config.DropdownColumn(
+                            "Category",
+                            options=["Food", "Drink", "Toiletries", "Household", "General"],
+                            width="small",
+                        ),
+                        "Qty": st.column_config.NumberColumn("Qty", min_value=0, step=1, width="small"),
+                        "Unit_Price": st.column_config.NumberColumn("Unit Price", format="%.2f", width="small"),
+                        "Discount": st.column_config.NumberColumn("Discount", format="%.2f", width="small"),
+                        "Split_Type": st.column_config.SelectboxColumn(
+                            "Split",
+                            options=["Shared", "Private"],
+                            width="small",
+                        ),
+                        "Beneficiary": st.column_config.SelectboxColumn(
+                            "Beneficiary",
+                            options=["ALL", "A", "B", "C", "AB", "BC", "AC"],
+                            width="small",
+                        ),
+                    }
+                    edited_df = st.data_editor(
+                        df_items,
+                        column_config=col_config,
+                        column_order=list(col_config.keys()),
+                        hide_index=True,
+                        use_container_width=True,
+                        key="edit_history_editor",
+                    )
+
+                    # Compute Line_Total after edit.
+                    for col in ["Qty", "Unit_Price", "Discount"]:
+                        if col in edited_df.columns:
+                            edited_df[col] = pd.to_numeric(edited_df[col], errors="coerce").fillna(0)
+                    edited_df["Line_Total"] = _compute_line_totals(edited_df)
+
+                    col_update, _ = st.columns([1, 5])
+                    with col_update:
+                        update_clicked = st.button("Update Receipt", type="primary", key="update_btn")
+
+                    if update_clicked and not edited_df.empty:
+                        try:
+                            with st.spinner("Updating receipt…"):
+                                clean_df = _clean_df_for_sheets(edited_df)
+                                from app.services.ledger import update_receipt  # type: ignore
+
+                                receipt_data = {
+                                    "Receipt_ID": selected_rid,
+                                    "Date": df_receipts[df_receipts["Receipt_ID"] == selected_rid]["Date"].iloc[0] if selected_rid in df_receipts["Receipt_ID"].values else "",
+                                    "Store": df_receipts[df_receipts["Receipt_ID"] == selected_rid]["Store"].iloc[0] if selected_rid in df_receipts["Store"].values else "",
+                                    "Paid_By": selected_user,
+                                    "Header_Discounts": 0.0,
+                                    "Grand_Total": float(edited_df["Line_Total"].sum()),
+                                    "Shared_Total": 0.0,
+                                    "Notes": "",
+                                }
+                                items = clean_df.to_dict(orient="records")
+                                update_receipt(selected_rid, receipt_data, items)
+                            st.toast(f"Updated receipt **{selected_rid}**", icon="✅")
+                            st.success(f"Receipt **{selected_rid}** updated successfully.")
+                        except Exception as exc:
+                            st.error(f"Error updating receipt: {str(exc)}")
+                else:
+                    st.info("No items found for this receipt.")
+            except Exception as exc:
+                st.error(f"Failed to load items: {exc}")
     else:
-        df_filtered = df_hist.copy()
+        st.info("No receipts found. Upload a receipt to get started.")
 
-    st.subheader("Purchase History")
-    st.dataframe(df_filtered, use_container_width=True)
 
-    # ------------------------------------------------------------------ #
-    # Monthly quantity chart                                               #
-    # ------------------------------------------------------------------ #
-    if not df_filtered.empty and search.strip():
-        try:
-            df_filtered["date"] = pd.to_datetime(df_filtered["date"])  # type: ignore[call-arg, union-attr]
-            df_filtered["month"] = df_filtered["date"].dt.to_period("M")  # type: ignore[union-attr]
+# =========================================================================== #
+# Tab 3 — Balances & Settlements                                               #
+# =========================================================================== #
 
-            agg = (
-                df_filtered.groupby(["month", "item_name"], observed=False)["qty"]  # type: ignore[union-attr, attr-defined]
-                .sum()
-                .reset_index()
-            )
-            fig = px.bar(
-                agg,
-                x="month",
-                y="qty",
-                color="item_name",
-                barmode="group",
-                title=f"Monthly Quantity — '{search}'",
-                labels={"month": "Month", "qty": "Quantity"},
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception as exc:
-            st.warning(f"Could not render chart: {exc}")
+elif selected_tab == "Balances & Settlements":
+    st.title("Balances & Settlements")
+    st.caption("Track who owes whom based on shared expenses and settlements.")
 
-    elif not search.strip():
-        st.info("Enter a product name to see monthly quantity trends.")
+    try:
+        with st.spinner("Loading data…"):
+            from app.services.ledger import get_all_receipts, get_receipt_items, get_settlements  # type: ignore
+
+            df_receipts = get_all_receipts()
+            df_settlements = get_settlements()
+    except Exception as exc:
+        st.error(f"Failed to load data: {exc}")
+        df_receipts = pd.DataFrame(columns=["Receipt_ID", "Date", "Store", "Paid_By"])
+        df_settlements = pd.DataFrame(columns=["Settlement_ID", "Date", "From_Roommate", "To_Roommate", "Amount", "Method"])
+
+    if not df_receipts.empty:
+        # Build balance dictionary per roommate
+        balances = {rm: 0.0 for rm in _DEFAULT_ROOMMATES}
+
+        for rid in df_receipts["Receipt_ID"].dropna().unique():
+            try:
+                items_df = get_receipt_items(str(rid))
+                if items_df.empty:
+                    continue
+                # Get payer from Receipts sheet
+                payer_row = df_receipts[df_receipts["Receipt_ID"] == rid]
+                payer = str(payer_row["Paid_By"].iloc[0]) if len(payer_row) > 0 else selected_user
+
+                for _, item in items_df.iterrows():
+                    line_total = float(item.get("Line_Total", 0))
+                    split_type = str(item.get("Split_Type", "Shared"))
+                    beneficiary_str = str(item.get("Beneficiary", "ALL"))
+
+                    # Payer gets out-of-pocket credit
+                    if payer in balances and line_total > 0:
+                        balances[payer] += line_total
+
+                    if split_type == "Shared":
+                        # Determine how many beneficiaries
+                        if beneficiary_str == "ALL":
+                            n_beneficiaries = 3
+                        elif len(beneficiary_str) == 2:
+                            n_beneficiaries = 2
+                        else:
+                            n_beneficiaries = 1
+
+                        share_per_beneficiary = line_total / n_beneficiaries
+                        # Deduct each beneficiary's share
+                        for rm in _DEFAULT_ROOMMATES:
+                            initial = _get_roommate_label(rm)
+                            if initial in beneficiary_str:
+                                if rm != payer:
+                                    balances[rm] -= share_per_beneficiary
+
+                    elif split_type == "Private":
+                        # Only the specific beneficiary is charged (not the payer's share)
+                        for rm in _DEFAULT_ROOMMATES:
+                            initial = _get_roommate_label(rm)
+                            if initial in beneficiary_str and rm != payer:
+                                balances[rm] -= line_total
+
+            except Exception as exc:
+                logger = __import__("logging").getLogger(__name__)
+                logger.warning("Error processing receipt %s: %s", rid, exc)
+                continue
+
+        # Apply settlements
+        if not df_settlements.empty and "From_Roommate" in df_settlements.columns and "Amount" in df_settlements.columns:
+            for _, row in df_settlements.iterrows():
+                frm = str(row.get("From_Roommate", ""))
+                to = str(row.get("To_Roommate", ""))
+                amt = float(row.get("Amount", 0))
+
+                # Find matching roommate labels
+                if amt > 0:
+                    for rm in _DEFAULT_ROOMMATES:
+                        if rm.startswith(frm) or (rm[-1] == frm[-1]):
+                            balances[rm] -= amt
+                            break
+                    for rm in _DEFAULT_ROOMMATES:
+                        if rm.startswith(to) or (rm[-1] == to[-1]):
+                            balances[rm] += amt
+                            break
+
+        # Display balance metrics
+        st.subheader("Current Balances")
+        bal_cols = st.columns(len(_DEFAULT_ROOMMATES))
+        for col, rm in zip(bal_cols, _DEFAULT_ROOMMATES):
+            with col:
+                val = balances.get(rm, 0.0)
+                status = "green" if val > 0 else "red" if val < -0.01 else "gray"
+                st.metric(
+                    rm,
+                    f"${abs(val):,.2f}",
+                    delta=f"{'Owes' if val < -0.01 else 'Is owed' if val > 0.01 else 'Settled'}",
+                    delta_color="inverse" if val < 0 else "normal",
+                )
+
+        # Who-owes-whom matrix
+        st.subheader("Who Owes Whom")
+        owes_rows = []
+        for rm_from in _DEFAULT_ROOMMATES:
+            for rm_to in _DEFAULT_ROOMMATES:
+                if rm_from != rm_to:
+                    diff = -(balances[rm_from] + balances[rm_to])
+                    # If from is negative (owes), and to is positive (is owed)
+                    if balances[rm_from] < -0.01 and balances[rm_to] > 0.01:
+                        net = min(abs(balances[rm_from]), balances[rm_to])
+                        owes_rows.append({
+                            "From": rm_from,
+                            "To": rm_to,
+                            "Amount": round(net, 2),
+                        })
+
+        if owes_rows:
+            df_owes = pd.DataFrame(owes_rows)
+            st.dataframe(df_owes, hide_index=True, use_container_width=True)
+        else:
+            st.info("Everyone is settled up! 🎉")
+
+        # Settlement form
+        st.subheader("Log Settlement")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            frm_rm = st.selectbox("From", _DEFAULT_ROOMMATES, key="settlement_from")
+        with c2:
+            to_rm = st.selectbox("To", _DEFAULT_ROOMMATES, key="settlement_to")
+        with c3:
+            amt = st.number_input("Amount ($)", min_value=0.0, step=0.01, format="%.2f", key="settlement_amount")
+        with c4:
+            method = st.selectbox("Method", ["Bank Transfer", "Twint", "Cash"], key="settlement_method")
+
+        if st.button("Log Settlement", type="primary", key="log_settlement_btn"):
+            try:
+                with st.spinner("Logging settlement…"):
+                    from app.services.ledger import append_settlement  # type: ignore
+                    sid = append_settlement(frm_rm, to_rm, amt, method)
+                st.toast(f"Settlement **{sid}** logged.", icon="✅")
+            except Exception as exc:
+                st.error(f"Error logging settlement: {str(exc)}")
+
+    else:
+        st.info("No receipts found. Upload a receipt to start tracking balances.")
+
+
+# =========================================================================== #
+# Tab 4 — Parent Reports                                                       #
+# =========================================================================== #
+
+elif selected_tab == "Parent Reports":
+    st.title("Parent Reports")
+    st.caption("Browse expense history filtered by roommate and date range.")
+
+    try:
+        with st.spinner("Loading data…"):
+            from app.services.ledger import get_all_receipts, get_receipt_items  # type: ignore
+
+            df_receipts = get_all_receipts()
+    except Exception as exc:
+        st.error(f"Failed to load receipts: {exc}")
+        df_receipts = pd.DataFrame(columns=["Receipt_ID", "Date", "Store"])
+
+    if not df_receipts.empty and "Date" in df_receipts.columns and "Paid_By" in df_receipts.columns:
+        # Filter by date range
+        start_date, end_date = date_range[0], date_range[1]
+        df_receipts["Date"] = pd.to_datetime(df_receipts["Date"], errors="coerce")
+        df_filtered = df_receipts[
+            (df_receipts["Date"] >= pd.Timestamp(start_date)) &
+            (df_receipts["Date"] <= pd.Timestamp(end_date))
+        ].copy()
+
+        # Filter by selected roommate
+        if "Paid_By" in df_filtered.columns:
+            df_roommate = df_filtered[df_filtered["Paid_By"] == selected_user]
+        else:
+            df_roommate = df_filtered
+
+        # Show total metric
+        st.metric("Total Spent by Selected Roommate", f"${df_roommate['Grand_Total'].sum():,.2f}" if "Grand_Total" in df_roommate.columns else "$0.00")
+
+        st.divider()
+
+        # Display filtered DataFrame
+        st.subheader(f"Receipts — {selected_user}")
+        display_cols = [c for c in ["Receipt_ID", "Date", "Store", "Paid_By", "Grand_Total"] if c in df_roommate.columns]
+        if display_cols:
+            st.dataframe(df_roommate[display_cols], hide_index=True, use_container_width=True)
+
+        # Download CSV button
+        csv_data = df_roommate.to_csv(index=False).encode("utf-8") if not df_roommate.empty else b"Receipt_ID,Date,Store,Paid_By,Grand_Total\n"
+        st.download_button(
+            label="Download CSV",
+            data=csv_data,
+            file_name=f"wg-finance-{selected_user.replace(' ', '-')}-{start_date}-{end_date}.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info("No receipts found. Upload a receipt to see reports.")

@@ -2,18 +2,20 @@
 
 Handles the three core operations:
 1. ``calculate_split``  — compute per-person bearings for one item.
-2. ``append_transactions``  — write line-items to Sheet 1 (Transactions).
-3. ``update_summary``  — update running balances in Sheet 2 (Summary Ledger).
+2. ``save_receipt``  — write receipts to new 3-sheet model.
+3. ``compute_current_balances``  — backward-compat stub (legacy Summary Ledger; returns empty).
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
 from google.oauth2.service_account import Credentials
 import gspread
+import pandas as pd
 from gspread.client import Client as GSpreadClient
 from pydantic import ValidationError
 
@@ -67,84 +69,25 @@ from app.models import split_ratios, calculate_split  # noqa: F401
 
 
 # ------------------------------------------------------------------ #
-# Line-item worksheet helper                                           #
+# New headers for the 3 sheets
 # ------------------------------------------------------------------ #
 
-_LINE_ITEMS_HEADERS: list[str] = [
-    "Date", "Merchant", "Payer", "Product Name", "Price", "Qty", "Category", "Is Shared",
+_RECEIPT_HEADERS = [
+    "Receipt_ID", "Date", "Store", "Paid_By", "Header_Discounts",
+    "Grand_Total", "Shared_Total", "Notes"
+]
+_LINE_ITEMS_HEADERS_V2 = [
+    "Receipt_ID", "Date", "Store", "Paid_By", "Product_Name",
+    "Category", "Qty", "Unit_Price", "Discount", "Line_Total",
+    "Split_Type", "Beneficiary"
+]
+_SETTLEMENT_HEADERS = [
+    "Settlement_ID", "Date", "From_Roommate", "To_Roommate", "Amount", "Method"
 ]
 
 
-def _ensure_receipt_items_worksheet() -> gspread.Worksheet:
-    """Open or create the ``Receipt_Items`` worksheet with headers."""
-    spreadsheet = _open_sheet()
-    existing_names = [ws.title for ws in spreadsheet.worksheets()]
-    if "Receipt_Items" not in existing_names:
-        worksheet = spreadsheet.add_worksheet(
-            title="Receipt_Items", rows=1, cols=len(_LINE_ITEMS_HEADERS),
-        )
-        worksheet.clear()  # remove the empty default row added by add_worksheet
-        worksheet.insert_row(_LINE_ITEMS_HEADERS, idx=1)
-        logger.info("Created new 'Receipt_Items' worksheet with headers.")
-        return worksheet
-
-    worksheet = spreadsheet.worksheet("Receipt_Items")
-
-    # Ensure headers exist even if someone deleted them.
-    header_row = worksheet.row_values(1)
-    if not header_row or header_row[0] != _LINE_ITEMS_HEADERS[0]:
-        worksheet.clear()
-        worksheet.insert_row(_LINE_ITEMS_HEADERS, idx=1)
-        logger.info("Re-created 'Receipt_Items' headers.")
-
-    return worksheet
-
-
-def append_line_items(merchant: str, date: str, payer: str, items: list[dict]) -> int:
-    """Append itemised line-item rows to the ``Receipt_Items`` sheet.
-
-    Parameters
-    ----------
-    merchant :
-        Store / vendor name.
-    date :
-        Purchase date (YYYY-MM-DD).
-    payer :
-        Roommate label who paid the receipt.
-    items :
-        List of dicts with keys: ``name``, ``price``, ``qty``, ``category``, ``is_shared``.
-
-    Returns
-    -------
-    int
-        Number of rows appended.
-    """
-    if not items:
-        return 0
-
-    worksheet = _ensure_receipt_items_worksheet()
-
-    values = [
-        [
-            date,
-            merchant,
-            payer,
-            item.get("name", ""),
-            float(item.get("price", 0)),
-            int(item.get("qty", 1)),
-            item.get("category", ""),
-            str(item.get("is_shared", True)),
-        ]
-        for item in items
-    ]
-
-    worksheet.append_rows(values, value_input="USER_ENTERED")
-    logger.info("Appended %d Receipt_Items rows (merchant=%s)", len(items), merchant)
-    return len(items)
-
-
 # ------------------------------------------------------------------ #
-# Google Sheets updaters                                               #
+# New Google Sheets helpers
 # ------------------------------------------------------------------ #
 
 def _open_sheet() -> gspread.Spreadsheet:
@@ -158,195 +101,250 @@ def _open_sheet() -> gspread.Spreadsheet:
     return client.open_by_key(sheet_id)
 
 
-async def append_transactions(entries: Sequence[LedgerEntry]) -> int:
-    """Append one or more LedgerEntry rows to the 'Transactions' sheet.
-
-    Parameters
-    ----------
-    entries :
-        Parsed line-items ready to write.
-
-    Returns
-    -------
-    int
-        Number of rows successfully appended.
-    """
-    if not entries:
-        return 0
-
+def _ensure_all_worksheets() -> dict[str, gspread.Worksheet]:
+    """Ensure all required worksheets exist and return a dict of them."""
     spreadsheet = _open_sheet()
-    worksheet = spreadsheet.worksheet("Transactions")
 
-    # Header row must already exist; we append values below it.
-    header = [
-        "date", "payer_phone", "payer_name", "merchant",
-        "item_name", "price", "split_category",
-        "A_bears", "B_bears", "C_bears",
-    ]
+    # Get existing worksheet names
+    existing_names = [ws.title for ws in spreadsheet.worksheets()]
 
-    # gspread's append_all expects rows aligned to existing headers.
-    values = [header] + [
-        [
-            entry.date,
-            entry.payer_phone,
-            entry.payer_name,
-            entry.merchant,
-            entry.item_name,
-            entry.price,
-            entry.split_category.value,
-            entry.a_bears,
-            entry.b_bears,
-            entry.c_bears,
-        ]
-        for entry in entries
-    ]
+    # Define required worksheets
+    required_sheets = ["Receipts", "Receipt_Items", "Settlements"]
 
-    # Use append_values to bulk-append rows.
-    worksheet.append_rows(values, value_input="USER_ENTERED")
-    logger.info("Appended %d transaction rows.", len(entries))
-    return len(entries)
+    # Create any missing worksheets
+    worksheets = {}
+    for sheet_name in required_sheets:
+        if sheet_name not in existing_names:
+            # Calculate buffer size - using header length + some extra
+            if sheet_name == "Receipts":
+                headers = _RECEIPT_HEADERS
+            elif sheet_name == "Receipt_Items":
+                headers = _LINE_ITEMS_HEADERS_V2
+            else:  # Settlements
+                headers = _SETTLEMENT_HEADERS
 
+            worksheet = spreadsheet.add_worksheet(
+                title=sheet_name,
+                rows=101,
+                cols=len(headers) + 5  # Adding buffer columns
+            )
+            worksheet.clear()  # remove the empty default row added by add_worksheet
+            worksheet.insert_row(headers, idx=1)
+            logger.info(f"Created new '{sheet_name}' worksheet with headers.")
+        else:
+            worksheet = spreadsheet.worksheet(sheet_name)
 
-async def update_summary(
-    date: str,
-    payer_label: str,
-    bearings: Dict[str, float],
-    grand_total: float,
-) -> SharehouseLedgerState:
-    """Update running balances in the 'Summary Ledger' sheet.
+        worksheets[sheet_name] = worksheet
 
-    Standard sharehouse model::
-
-        Balance = (total you paid for others) − (total others owe for you)
-
-    When A pays $30 and items split evenly:
-      - A's balance goes up by 30 (they are owed $10 each by B & C).
-      - But tracking per-bearing is cleaner; net change = grand_total
-        redistributed according to bearings.
-
-    Parameters
-    ----------
-    date :
-        Transaction date YYYY-MM-DD.
-    payer_label :
-        Roommate label ("A", "B", or "C") who paid the bill.
-    bearings :
-        Per-person bearing dict from ``calculate_split``.
-    grand_total :
-        Total amount of this transaction.
-
-    Returns
-    -------
-    SharehouseLedgerState
-        Updated balances after this transaction.
-    """
-    spreadsheet = _open_sheet()
-    worksheet = spreadsheet.worksheet("Summary Ledger")
-
-    # Read current row (most recent balance update).
-    all_values = worksheet.get_all_values()
-    if all_values:
-        latest = all_values[-1]
-        prev_a = float(latest[1]) if len(latest) > 1 else 0.0
-        prev_b = float(latest[2]) if len(latest) > 2 else 0.0
-        prev_c = float(latest[3]) if len(latest) > 3 else 0.0
-    else:
-        prev_a = prev_b = prev_c = 0.0
-
-    # Net balance update: each person's bearing is what they *owe*.
-    # The payer's effective recovery = grand_total − their own bearing.
-    new_a = round(prev_a - bearings["A"] + (grand_total if payer_label == "A" else 0), 2)
-    new_b = round(prev_b - bearings["B"] + (grand_total if payer_label == "B" else 0), 2)
-    new_c = round(prev_c - bearings["C"] + (grand_total if payer_label == "C" else 0), 2)
-
-    worksheet.append_row([date, "split_update", new_a, new_b, new_c])
-    logger.info("Updated summary ledger: A=%.2f B=%.2f C=%.2f", new_a, new_b, new_c)
-
-    return SharehouseLedgerState(
-        balances=[
-            RoommateBalance(name="Person A", phone="", balance=new_a),
-            RoommateBalance(name="Person B", phone="", balance=new_b),
-            RoommateBalance(name="Person C", phone="", balance=new_c),
-        ],
-    )
+    return worksheets
 
 
-async def process_receipt(
-    receipt: ReceiptData,
-    payer_phone: str,
-    roommate_map: Dict[str, str],
-) -> SharehouseLedgerState:
-    """End-to-end pipeline: parse bearings → write sheet → return balances.
-
-    Parameters
-    ----------
-    receipt :
-        Parsed ``ReceiptData`` from the vision service.
-    payer_phone :
-        WhatsApp sender phone number (with protocol prefix).
-    roommate_map :
-        Mapping of phone number prefix → roommate label.
-
-    Returns
-    -------
-    SharehouseLedgerState
-    """
-    # Map phone to roommate label.
-    payer_label = ""
-    for pattern, name in roommate_map.items():
-        if pattern in payer_phone:
-            payer_label = name
-            break
-    if not payer_label:
-        raise ValueError(f"Unknown payer phone: {payer_phone}")
-
-    # Build LedgerEntry rows.
-    entries = compute_bearings(receipt.items)
-    for e in entries:
-        e.date = receipt.date
-        e.payer_phone = payer_phone
-        e.payer_name = payer_label
-        e.merchant = receipt.merchant  # type: ignore[assignment]
-
-    # Write to Google Sheets.
-    await append_transactions(entries)
-
-    # Return current state (caller formats reply).
-    return SharehouseLedgerState(
-        balances=[
-            RoommateBalance(name="Person A", phone="", balance=0.0),
-            RoommateBalance(name="Person B", phone="", balance=0.0),
-            RoommateBalance(name="Person C", phone="", balance=0.0),
-        ],
-    )
-
-
-def compute_current_balances() -> Dict[str, float]:
-    """Return the latest net balances for each roommate from Summary Ledger.
-
-    Reads Sheet 2 (Summary Ledger) and extracts the most recent row's
-    A_balance, B_balance, C_balance columns.
-    Falls back to $0.00 when the sheet is empty or unavailable.
-    """
-    balances: Dict[str, float] = {
-        "Person A": 0.0, "Person B": 0.0, "Person C": 0.0,
-    }
+def get_all_receipts() -> pd.DataFrame:
+    """Read all receipts from the 'Receipts' sheet."""
     try:
         spreadsheet = _open_sheet()
-        worksheet = spreadsheet.worksheet("Summary Ledger")
-        all_values = worksheet.get_all_values()
-        if not all_values:
-            return balances
+        worksheet = spreadsheet.worksheet("Receipts")
+        values = worksheet.get_all_values()
 
-        # Summary Ledger columns: Roommate | Total Paid | Total Owed | Net Balance
-        for row in reversed(all_values):
-            if len(row) >= 4 and row[3]:  # column D = Net Balance
-                name = row[0]
-                try:
-                    balances[name] = float(row[3])
-                except (ValueError, TypeError):
-                    pass
-                break  # only the last data row matters
-    except Exception:
-        logger.exception("compute_current_balances failed")
-    return balances
+        if not values or len(values) < 2:
+            # Return empty DataFrame with required columns
+            return pd.DataFrame(columns=_RECEIPT_HEADERS)
+
+        # First row is headers
+        df = pd.DataFrame(values[1:], columns=values[0])
+        return df
+    except Exception as e:
+        logger.error(f"Error reading receipts: {e}")
+        # Return empty DataFrame with required columns
+        return pd.DataFrame(columns=_RECEIPT_HEADERS)
+
+
+def get_receipt_items(receipt_id: str = None) -> pd.DataFrame:
+    """Read receipt items from the 'Receipt_Items' sheet."""
+    try:
+        spreadsheet = _open_sheet()
+        worksheet = spreadsheet.worksheet("Receipt_Items")
+        values = worksheet.get_all_values()
+
+        if not values or len(values) < 2:
+            # Return empty DataFrame with required columns
+            return pd.DataFrame(columns=_LINE_ITEMS_HEADERS_V2)
+
+        # First row is headers
+        df = pd.DataFrame(values[1:], columns=values[0])
+
+        if receipt_id:
+            df = df[df["Receipt_ID"] == receipt_id]
+
+        return df
+    except Exception as e:
+        logger.error(f"Error reading receipt items: {e}")
+        # Return empty DataFrame with required columns
+        return pd.DataFrame(columns=_LINE_ITEMS_HEADERS_V2)
+
+
+def get_settlements() -> pd.DataFrame:
+    """Read all settlements from the 'Settlements' sheet."""
+    try:
+        spreadsheet = _open_sheet()
+        worksheet = spreadsheet.worksheet("Settlements")
+        values = worksheet.get_all_values()
+
+        if not values or len(values) < 2:
+            # Return empty DataFrame with required columns
+            return pd.DataFrame(columns=_SETTLEMENT_HEADERS)
+
+        # First row is headers
+        df = pd.DataFrame(values[1:], columns=values[0])
+        return df
+    except Exception as e:
+        logger.error(f"Error reading settlements: {e}")
+        # Return empty DataFrame with required columns
+        return pd.DataFrame(columns=_SETTLEMENT_HEADERS)
+
+
+def save_receipt(receipt_data: dict, items: list[dict]) -> str:
+    """Save receipt data and line items to Google Sheets."""
+    # Generate receipt_id if not provided
+    receipt_id = receipt_data.get("Receipt_ID")
+    if not receipt_id:
+        date = datetime.now()
+        receipt_id = f"REC-{date:%Y%m%d-%H%M%S}"
+        receipt_data["Receipt_ID"] = receipt_id
+
+    # Ensure all worksheets exist
+    worksheets = _ensure_all_worksheets()
+
+    # Write receipt data to "Receipts" sheet
+    receipt_row = [
+        receipt_data.get("Receipt_ID", ""),
+        receipt_data.get("Date", ""),
+        receipt_data.get("Store", ""),
+        receipt_data.get("Paid_By", ""),
+        receipt_data.get("Header_Discounts", ""),
+        receipt_data.get("Grand_Total", 0),
+        receipt_data.get("Shared_Total", 0),
+        receipt_data.get("Notes", "")
+    ]
+
+    # Handle NaN values for Google Sheets
+    receipt_row = [str(x) if isinstance(x, float) and pd.isna(x) else x for x in receipt_row]
+
+    worksheets["Receipts"].append_row(receipt_row, value_input_option="USER_ENTERED")
+
+    # Write item rows to "Receipt_Items" sheet
+    items_rows = []
+    for item in items:
+        row = [
+            receipt_id,
+            item.get("Date", ""),
+            item.get("Store", ""),
+            item.get("Paid_By", ""),
+            item.get("Product_Name", ""),
+            item.get("Category", ""),
+            int(item.get("Qty", 1)),
+            float(item.get("Unit_Price", 0)),
+            float(item.get("Discount", 0)),
+            float(item.get("Line_Total", 0)),
+            item.get("Split_Type", ""),
+            item.get("Beneficiary", "")
+        ]
+
+        # Handle NaN values for Google Sheets
+        row = [str(x) if isinstance(x, float) and pd.isna(x) else x for x in row]
+        items_rows.append(row)
+
+    if items_rows:
+        worksheets["Receipt_Items"].append_rows(items_rows, value_input_option="USER_ENTERED")
+
+    return receipt_id
+
+
+def update_receipt(receipt_id: str, receipt_data: dict, items: list[dict]):
+    """Update an existing receipt in Google Sheets."""
+    # Get current data to find rows
+    try:
+        spreadsheet = _open_sheet()
+
+        # Find the receipt row in "Receipts" sheet
+        receipts_ws = spreadsheet.worksheet("Receipts")
+        receipt_values = receipts_ws.get_all_values()
+
+        if not receipt_values or len(receipt_values) < 2:
+            raise ValueError(f"No receipts found to update for {receipt_id}")
+
+        # Find receipt rows (skip header row)
+        receipt_indices = []
+        for i, row in enumerate(receipt_values[1:], start=2):  # Start from 2 since row index is 1-based
+            if len(row) > 0 and row[0] == receipt_id:
+                receipt_indices.append(i)
+
+        # Delete existing rows from bottom to top to avoid shifting issues
+        for idx in sorted(receipt_indices, reverse=True):
+            receipts_ws.batch_update({'deletions': str(idx)})
+
+        # Find item rows in "Receipt_Items" sheet
+        items_ws = spreadsheet.worksheet("Receipt_Items")
+        items_values = items_ws.get_all_values()
+
+        if not items_values or len(items_values) < 2:
+            raise ValueError(f"No receipt items found to update for {receipt_id}")
+
+        # Find item rows
+        item_indices = []
+        for i, row in enumerate(items_values[1:], start=2):  # Start from 2 since row index is 1-based
+            if len(row) > 0 and row[0] == receipt_id:
+                item_indices.append(i)
+
+        # Delete existing rows from bottom to top to avoid shifting issues
+        for idx in sorted(item_indices, reverse=True):
+            items_ws.batch_update({'deletions': str(idx)})
+
+        # Append new data
+        save_receipt(receipt_data, items)
+
+    except Exception as e:
+        logger.error(f"Error updating receipt {receipt_id}: {e}")
+        raise
+
+
+def append_settlement(from_roommate: str, to_roommate: str, amount: float, method: str = "Bank Transfer") -> str:
+    """Append a settlement record to the 'Settlements' sheet."""
+    # Generate settlement_id
+    date = datetime.now()
+    settlement_id = f"SET-{date:%Y%m%d-%H%M%S}"
+
+    # Ensure all worksheets exist
+    worksheets = _ensure_all_worksheets()
+
+    # Append settlement data
+    row = [
+        settlement_id,
+        date.strftime("%Y-%m-%d"),
+        from_roommate,
+        to_roommate,
+        float(amount),
+        method
+    ]
+
+    # Handle NaN values for Google Sheets
+    row = [str(x) if isinstance(x, float) and pd.isna(x) else x for x in row]
+
+    worksheets["Settlements"].append_row(row, value_input_option="USER_ENTERED")
+
+    return settlement_id
+
+
+# ------------------------------------------------------------------ #
+# Legacy compat — Telegram bot /balance & /status commands            #
+# ------------------------------------------------------------------ #
+
+def compute_current_balances() -> Dict[str, float]:
+    """Return current net balances for each roommate (legacy Summary Ledger).
+
+    The new balance calculation has moved to the dashboard's Balances & Settlements
+    tab. This stub is kept for backward-compat with the Telegram bot's /balance
+    and /status commands which still reference this function. It returns empty
+    balances since the old Summary Ledger sheet is no longer updated.
+    """
+    return {"Person A": 0.0, "Person B": 0.0, "Person C": 0.0}
