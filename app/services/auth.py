@@ -20,6 +20,11 @@ from werkzeug.security import generate_password_hash, check_password_hash  # typ
 
 logger = logging.getLogger(__name__)
 
+# Result codes returned by verify_user().
+RESULT_OK = "ok"            # credentials valid — returns display name.
+RESULT_BAD_CREDS = "bad_creds"   # user not found or wrong password.
+RESULT_DB_ERROR = "db_error"     # couldn't connect / read Users sheet.
+
 # Temporary default passwords — users should change these on first login.
 _DEFAULT_PASSWORDS = {
     "shin": "changeme",
@@ -32,6 +37,7 @@ def _ensure_users_sheet() -> None:
     """Create the ``Users`` worksheet and seed default users if empty.
 
     Wrapped in try/except so a failed import does not crash the app.
+    Uses lowercase usernames and title-cased display names.
     """
     from app.services.ledger import _open_sheet
 
@@ -65,11 +71,11 @@ def _ensure_users_sheet() -> None:
         rows_to_add = []
         for username, password in _DEFAULT_PASSWORDS.items():
             try:
-                rows_to_add.append([
-                    username,
-                    generate_password_hash(password),
-                    username.title(),  # "Shin", "Fabian", "Pierre"
-                ])
+                # Username is already lowercase key; ensure lowercased for safety.
+                user_lower = str(username).strip().lower()
+                display_name = user_lower.title()
+                hashed = generate_password_hash(password)
+                rows_to_add.append([user_lower, hashed, display_name])
             except Exception:
                 logger.warning("Could not hash password for %s.", username)
         if rows_to_add:
@@ -82,62 +88,74 @@ def _ensure_users_sheet() -> None:
                 logger.warning("Could not append seeded rows to Users worksheet.")
 
 
-def verify_user(username: str, password: str) -> str | None:
+def verify_user(username: str, password: str) -> tuple[str, str | None]:
     """Verify credentials against the ``Users`` sheet.
 
-    Ensures the Users sheet is initialised first (lazy seeding).
+    Returns a ``(result_code, payload)`` pair:
 
-    Returns the display *Name* on success, or ``None`` on failure.
+    * ``(RESULT_OK, display_name)`` — login succeeded.
+    * ``(RESULT_BAD_CREDS, None)``  — wrong username or password.
+    * ``(RESULT_DB_ERROR, message)`` — couldn't reach the Users worksheet.
     """
     _ensure_users_sheet()
 
     from app.services.ledger import _open_sheet
 
+    # --- Open connection -------------------------------------------------- #
     try:
         client = _open_sheet()
-    except Exception:
-        return None
+    except Exception as exc:
+        return RESULT_DB_ERROR, f"Unable to connect to Google Sheets authentication table. Please verify Streamlit Cloud Secrets."
 
+    # --- Fetch worksheet -------------------------------------------------- #
     try:
         ws = client.worksheet("Users")
     except Exception:
-        return None
+        return RESULT_DB_ERROR, "Authentication table (Users sheet) is unavailable. Try again later."
 
     try:
         values = ws.get_all_values()
     except Exception:
-        return None
+        return RESULT_DB_ERROR, "Could not read authentication data from the Google Sheet."
 
     if len(values) < 2:
-        return None
+        # Table has only headers or is empty — treat as no such user.
+        return RESULT_BAD_CREDS, None
 
-    # Locate column indices from headers.
+    # --- Locate columns from headers -------------------------------------- #
     headers = [str(h).strip().lower() for h in values[0]]
     uname_idx = headers.index("username") if "username" in headers else 0
     pw_idx = headers.index("passwordhash") if "passwordhash" in headers else 1
 
+    # Normalise input username.
     username_lower = username.strip().lower()
-    name_col = min(pw_idx + 1, len(values[0]) - 1) if len(values[0]) > pw_idx + 1 else uname_idx
 
+    # --- Compare against every row ---------------------------------------- #
     for row in values[1:]:
         if len(row) <= max(uname_idx, pw_idx):
             continue
-        if str(row[uname_idx]).strip().lower() != username_lower:
+        stored_user = str(row[uname_idx]).strip().lower()
+        if stored_user != username_lower:
             continue
+
+        # Username matched — now check the password.
         stored_hash = str(row[pw_idx])
         try:
             if check_password_hash(stored_hash, password):
-                # Return display name (last column).
-                return str(row[name_col]) if len(row) > name_col else username.title()
+                name_col = min(pw_idx + 1, len(values[0]) - 1) if len(values[0]) > pw_idx + 1 else uname_idx
+                display_name = str(row[name_col]) if len(row) > name_col else username.title()
+                return RESULT_OK, display_name
         except Exception:
             logger.warning("Password verification failed for %s", username_lower)
-    return None
+
+    # No matching row found.
+    return RESULT_BAD_CREDS, None
 
 
-def change_password(username: str, old_password: str, new_password: str) -> bool:
+def change_password(username: str, old_password: str, new_password: str) -> tuple[bool, str]:
     """Update a user's password in the ``Users`` sheet.
 
-    Returns ``True`` on success, ``False`` on failure.
+    Returns ``(success: bool, message: str)``.
     """
     _ensure_users_sheet()
 
@@ -146,20 +164,20 @@ def change_password(username: str, old_password: str, new_password: str) -> bool
     try:
         client = _open_sheet()
     except Exception:
-        return False
+        return False, "Unable to connect to Google Sheets."
 
     try:
         ws = client.worksheet("Users")
     except Exception:
-        return False
+        return False, "Authentication table (Users sheet) is unavailable."
 
     try:
         values = ws.get_all_values()
     except Exception:
-        return False
+        return False, "Could not read authentication data from the Google Sheet."
 
     if len(values) < 2:
-        return False
+        return False, "No users found in the Authentication table."
 
     headers = [str(h).strip().lower() for h in values[0]]
     uname_idx = headers.index("username") if "username" in headers else 0
@@ -173,9 +191,10 @@ def change_password(username: str, old_password: str, new_password: str) -> bool
             try:
                 new_hash = generate_password_hash(new_password)
                 ws.update_cell(i, pw_idx + 1, new_hash)
-                return True
+                return True, "Password updated."
             except Exception:
                 logger.warning("Could not update password for %s", username)
-                return False
+                return False, "Could not update password. Contact Shin."
 
-    return False
+    # Username not found in the sheet.
+    return False, "Username not found in authentication table."

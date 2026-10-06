@@ -97,14 +97,25 @@ with st.sidebar:
             _uname = st.text_input("Username", key="login_username")
             _pw = st.text_input("Password", type="password", key="login_password")
             if st.form_submit_button("Login"):
-                from app.services.auth import verify_user  # noqa: E402
+                from app.services.auth import (  # noqa: E402
+                    verify_user,
+                    RESULT_OK,
+                    RESULT_BAD_CREDS,
+                    RESULT_DB_ERROR,
+                )
 
-                name = verify_user(_uname, _pw)
-                if name:
-                    st.session_state.logged_in_user = _uname
-                    st.session_state.logged_in_name = name
-                    st.success(f"Welcome, {name}!")
+                result_code, payload = verify_user(_uname, _pw)
+                if result_code == RESULT_OK and payload:
+                    st.session_state.logged_in_user = _uname.strip().lower()
+                    st.session_state.logged_in_name = payload
+                    st.success(f"Welcome, {payload}!")
+                elif result_code == RESULT_DB_ERROR:
+                    st.error(
+                        f"Unable to connect to Google Sheets authentication "
+                        f"table. Please verify Streamlit Cloud Secrets.",
+                    )
                 else:
+                    # RESULT_BAD_CREDS — wrong username or password.
                     st.error("Invalid credentials.")
         with st.expander("Forgot password?"):
             st.caption("Contact Shin to reset your password via the Google Sheet.")
@@ -128,10 +139,11 @@ with st.sidebar:
                     else:
                         from app.services.auth import change_password  # noqa: E402
 
-                        if change_password(logged_in, _old, _new):
-                            st.success("Password updated!")
+                        ok, msg = change_password(logged_in, _old, _new)
+                        if ok:
+                            st.success(msg)
                         else:
-                            st.error("Could not update password. Contact Shin.")
+                            st.error(msg)
 
     st.divider()
     today = date.today()
