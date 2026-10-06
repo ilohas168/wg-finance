@@ -23,12 +23,20 @@ class SplitType(str, Enum):
     """How to split one line-item among 3 roommates (A, B, C)."""
 
     SPLIT_3 = "SPLIT_3"       # All three: each pays 1/3
-    ONLY_A = "ONLY_A"          # Only Person A pays 100 %
-    ONLY_B = "ONLY_B"          # Only Person B pays 100 %
-    ONLY_C = "ONLY_C"          # Only Person C pays 100 %
+    ONLY_A = "ONLY_A"          # Only Shin pays 100 %
+    ONLY_B = "ONLY_B"          # Only Fabian pays 100 %
+    ONLY_C = "ONLY_C"          # Only Pierre pays 100 %
     SPLIT_AB = "SPLIT_AB"      # A and B each pay 50 %
     SPLIT_BC = "SPLIT_BC"      # B and C each pay 50 %
     SPLIT_AC = "SPLIT_AC"      # A and C each pay 50 %
+
+    # Named roommate splits (A=Shin, B=Fabian, C=Pierre).
+    ONLY_SHIN = "ONLY_SHIN"       # Only Shin pays 100%
+    ONLY_FABI = "ONLY_FABI"       # Only Fabian pays 100%
+    ONLY_PIERRE = "ONLY_PIERRE"   # Only Pierre pays 100%
+    SPLIT_SF = "SPLIT_SF"         # Shin & Fabian each pay 50%
+    SPLIT_SP = "SPLIT_SP"         # Shin & Pierre each pay 50%
+    SPLIT_FP = "SPLIT_FP"         # Fabian & Pierre each pay 50%
 
 
 # ------------------------------------------------------------------ #
@@ -127,7 +135,7 @@ class RoommateBalance(BaseModel):
     Balance < 0 means *this* person owes others money.
     """
 
-    name: str = Field(description="Roommate label, e.g. 'Person A'.")
+    name: str = Field(description="Roommate label, e.g. 'Shin'.")
     phone: str = Field(description="WhatsApp phone number (with protocol).")
     balance: float = Field(
         default=0.0,
@@ -168,7 +176,7 @@ class LedgerEntry(BaseModel):
 # ------------------------------------------------------------------ #
 
 def split_ratios(split_type: SplitType) -> dict[str, float]:
-    """Return the fractional share (A, B, C) for a given SplitType."""
+    """Return the fractional share (A=Shin, B=Fabian, C=Pierre) for a given SplitType."""
     mapping = {
         SplitType.SPLIT_3: {"A": 1 / 3, "B": 1 / 3, "C": 1 / 3},
         SplitType.ONLY_A: {"A": 1.0, "B": 0.0, "C": 0.0},
@@ -177,6 +185,13 @@ def split_ratios(split_type: SplitType) -> dict[str, float]:
         SplitType.SPLIT_AB: {"A": 0.5, "B": 0.5, "C": 0.0},
         SplitType.SPLIT_BC: {"A": 0.0, "B": 0.5, "C": 0.5},
         SplitType.SPLIT_AC: {"A": 0.5, "B": 0.0, "C": 0.5},
+        # Named roommate splits
+        SplitType.ONLY_SHIN: {"A": 1.0, "B": 0.0, "C": 0.0},
+        SplitType.ONLY_FABI: {"A": 0.0, "B": 1.0, "C": 0.0},
+        SplitType.ONLY_PIERRE: {"A": 0.0, "B": 0.0, "C": 1.0},
+        SplitType.SPLIT_SF: {"A": 0.5, "B": 0.5, "C": 0.0},
+        SplitType.SPLIT_SP: {"A": 0.5, "B": 0.0, "C": 0.5},
+        SplitType.SPLIT_FP: {"A": 0.0, "B": 0.5, "C": 0.5},
     }
     return mapping[split_type]
 
@@ -227,3 +242,47 @@ def compute_bearings(items: List[ReceiptItem]) -> list[LedgerEntry]:
             )
         )
     return entries
+
+
+# ------------------------------------------------------------------ #
+# Beneficiary ↔ SplitType converter                                    #
+# ------------------------------------------------------------------ #
+
+# Maps each SplitType to its canonical beneficiary string.
+_SPLIT_TO_BENEFICIARY = {
+    SplitType.SPLIT_3: "ALL",
+    SplitType.ONLY_A: "A",
+    SplitType.ONLY_B: "B",
+    SplitType.ONLY_C: "C",
+    SplitType.SPLIT_AB: "AB",
+    SplitType.SPLIT_BC: "BC",
+    SplitType.SPLIT_AC: "AC",
+    SplitType.ONLY_SHIN: "A",
+    SplitType.ONLY_FABI: "B",
+    SplitType.ONLY_PIERRE: "C",
+    SplitType.SPLIT_SF: "AB",
+    SplitType.SPLIT_SP: "AC",
+    SplitType.SPLIT_FP: "BC",
+}
+
+# Reverse mapping from (beneficiary, length) → SplitType.
+_SPLITS_FROM_BENEFICIARY = {
+    ("ALL", None): SplitType.SPLIT_3,
+    ("A", 1): SplitType.ONLY_A,
+    ("B", 1): SplitType.ONLY_B,
+    ("C", 1): SplitType.ONLY_C,
+    ("AB", 2): SplitType.SPLIT_AB,
+    ("BC", 2): SplitType.SPLIT_BC,
+    ("AC", 2): SplitType.SPLIT_AC,
+}
+
+
+def beneficiary_to_split_type(beneficiary: str) -> SplitType:
+    """Convert a beneficiary string (e.g. 'A', 'AB', 'ALL') to a SplitType."""
+    key = (beneficiary, len(beneficiary) if beneficiary != "ALL" else None)
+    return _SPLITS_FROM_BENEFICIARY.get(key, SplitType.SPLIT_3)
+
+
+def split_type_to_beneficiary(split: SplitType) -> str:
+    """Convert a SplitType to its canonical beneficiary string."""
+    return _SPLIT_TO_BENEFICIARY.get(split, "ALL")

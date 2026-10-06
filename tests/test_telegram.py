@@ -116,7 +116,7 @@ class TestWebhookTextCommands:
         # Mock the external calls (google sheets, telegram reply).
         with patch("app.services.ledger.compute_current_balances") as mock_bal:
             mock_bal.return_value = {
-                "Person A": 50.0, "Person B": -30.0, "Person C": -20.0,
+                "Shin": 50.0, "Fabian": -30.0, "Pierre": -20.0,
             }
             with patch("app.main._reply") as mock_reply:
                 resp = client.post("/webhook", json=payload)
@@ -137,7 +137,7 @@ class TestWebhookTextCommands:
         }
         with patch("app.services.ledger.compute_current_balances") as mock_bal:
             mock_bal.return_value = {
-                "Person A": 0.0, "Person B": 0.0, "Person C": 0.0,
+                "Shin": 0.0, "Fabian": 0.0, "Pierre": 0.0,
             }
             with patch("app.main._reply"):
                 resp = client.post("/webhook", json=payload)
@@ -255,7 +255,7 @@ class TestTelegramServiceHelpers:
             tax_total=0.49,
             grand_total=6.74,
         )
-        html = _format_receipt_reply(receipt, "Person A")
+        html = _format_receipt_reply(receipt, "Shin")
         assert "<b>" in html or "Receipt" in html  # should have formatting
         assert "$6.74" in html
 
@@ -269,9 +269,9 @@ class TestRoommateLookup:
 
     def test_known_user_id(self):
         from app.main import _lookup_roommate
-        assert _lookup_roommate(1555000001) == "Person A"
-        assert _lookup_roommate(1555000002) == "Person B"
-        assert _lookup_roommate(1555000003) == "Person C"
+        assert _lookup_roommate(1555000001) == "Shin"
+        assert _lookup_roommate(1555000002) == "Fabian"
+        assert _lookup_roommate(1555000003) == "Pierre"
 
     def test_unknown_user_id_returns_none(self):
         from app.main import _lookup_roommate

@@ -380,4 +380,4 @@ def compute_current_balances() -> Dict[str, float]:
     and /status commands which still reference this function. It returns empty
     balances since the old Summary Ledger sheet is no longer updated.
     """
-    return {"Person A": 0.0, "Person B": 0.0, "Person C": 0.0}
+    return {"Shin": 0.0, "Fabian": 0.0, "Pierre": 0.0}

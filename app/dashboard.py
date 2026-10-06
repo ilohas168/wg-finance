@@ -70,7 +70,7 @@ _CREDENTIAL_PATHS = [
 ]
 
 # Roommate display names — keep in sync with the webhook's ROOMMATE_MAP.
-ROOMMATES = ["Person A", "Person B", "Person C"]
+ROOMMATES = ["Shin", "Fabian", "Pierre"]
 
 
 # --------------------------------------------------------------------------- #
@@ -263,10 +263,10 @@ def main():
     for col, name in zip([col_a, col_b, col_c], ROOMMATES):
         val = balances[name]
         color = "green" if val > 0.01 else ("red" if val < -0.01 else "gray")
-        label = f"is owed ${val:,.2f}" if val >= 0 else f"owes ${abs(val):,.2f}"
+        label = f"is owed CHF {val:,.2f}" if val >= 0 else f"owes CHF {abs(val):,.2f}"
         col.metric(
             label=name,
-            value=f"${val:,.2f}",
+            value=f"CHF {val:,.2f}",
             delta=label,
             delta_color="inverse" if val < 0 else "normal",
         )

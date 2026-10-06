@@ -85,12 +85,12 @@ class Update(BaseModel):
 
 # Roommate lookup by Telegram user ID — matches roommates who have set up the bot.
 ROOMMATE_MAP: Dict[int, str] = {
-    1555000001: "Person A",
-    1555000002: "Person B",
-    1555000003: "Person C",
+    1555000001: "Shin",
+    1555000002: "Fabian",
+    1555000003: "Pierre",
 }
 
-_DEFAULT_PAYER = "Person A"
+_DEFAULT_PAYER = "Shin"
 
 
 @asynccontextmanager
@@ -330,12 +330,12 @@ async def _get_balances_reply() -> str:
         advice = _settlement_advice(balances)
 
         lines = ["<b>Sharehouse Balances</b>", ""]
-        for name in ["Person A", "Person B", "Person C"]:
+        for name in ["Shin", "Fabian", "Pierre"]:
             val = balances.get(name, 0.0)
             if val > 0:
-                status = f"is owed <b>${val:,.2f}</b>"
+                status = f"is owed <b>CHF {val:,.2f}</b>"
             elif val < 0:
-                status = f"owes <b>${abs(val):,.2f}</b>"
+                status = f"owes <b>CHF {abs(val):,.2f}</b>"
             else:
                 status = "<i>$0.00 (settled)</i>"
             lines.append(f"  {name} — {status}")

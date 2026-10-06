@@ -185,26 +185,69 @@ from app.models import calculate_split
 
 ---
 
-## 6. Pending Issue — GOOGLE_SHEET_ID Not Loading in Streamlit Cloud
+## 6. Resolved — GOOGLE_SHEET_ID Not Loading in Streamlit Cloud
 
-### Error Message
-> "Error saving to Sheets: Set GOOGLE_SHEET_ID environment variable to the target Sheet ID."
+### Fixed in commit `a320e8c`
 
-### Root Cause
-`GOOGLE_SHEET_ID` is loaded via `os.environ.get("GOOGLE_SHEET_ID", "")` in both:
-- `app/services/ledger.py:_open_sheet()` (line 95) — **this needs fixing**
-- `dashboard.py:SHEET_ID` (line 48) — also uses `os.environ`
+Both `app/services/ledger.py` and `app/dashboard.py` now use a `_get_sheet_id()`
+helper that resolves the sheet ID with this priority chain:
 
-In Streamlit Cloud, credentials are available via **`st.secrets`**, not `os.environ`. The current code falls back to empty string when the env var is missing, and `_open_sheet()` raises a RuntimeError.
+1. `st.secrets["GOOGLE_SHEET_ID"]` (Streamlit Cloud context)
+2. `os.environ.get("GOOGLE_SHEET_ID")` (local dev / ngrok tunnel)
+3. Hard-coded known-good default `"18oTLJ8Fpe_XKBdSwV0lTKe2ptSaRLIRHj_9JF0jsBq0"`
 
-### What Needs to Be Done
-Update both loaders to check `st.secrets` first, then `os.environ`, with known default fallback:
-```python
-def _get_sheet_id():
-    import streamlit as st  # lazy import for non-Streamlit contexts
-    val = getattr(st, 'secrets', {}).get('GOOGLE_SHEET_ID') or os.environ.get('GOOGLE_SHEET_ID')
-    return val or '18oTLJ8Fpe_XKBdSwV0lTKe2ptSaRLIRHj_9JF0jsBq0'
-```
+The lazy `import streamlit` pattern ensures the helper works in non-Streamlit
+contexts (FastAPI webhook side) without raising ImportError.
+
+---
+
+## 6a. Comprehensive Feature Update (CHF, Auth, Named Roommates)
+
+### Currency: CHF (Swiss Francs)
+All display values now use `CHF {value:,.2f}` instead of `$`. Affected files:
+- `dashboard.py` — all metric labels and delta values
+- `app/dashboard.py` — balance metrics and labels
+- `app/main.py` — Telegram bot /balance reply HTML
+
+### Roommate Names (A=Shin, B=Fabian, C=Pierre)
+- `_DEFAULT_ROOMMATES` in `dashboard.py`: `["Shin", "Fabian", "Pierre"]`
+- `_ROOMMATE_INITIALS`: maps names → internal codes A/B/C
+- `ROOMMATE_MAP` in `app/main.py`: updated Telegram IDs → new names
+- `ROOMMATES` in `app/dashboard.py`: `["Shin", "Fabian", "Pierre"]`
+- Legacy `compute_current_balances()` stub: returns `{"Shin": ..., ...}`
+
+### SplitType Enum Extensions (`app/models.py`)
+New enum values for named splits:
+`ONLY_SHIN`, `ONLY_FABI`, `ONLY_PIERRE`, `SPLIT_SF`, `SPLIT_SP`, `SPLIT_FP`
+All map to the same internal A/B/C ratios as legacy SPLIT types.
+
+### Beneficiary Display Labels (`dashboard.py`)
+- `_BENEFICIARY_LABELS`: maps internal codes → display names
+  - `"ALL"` → `"All (Shin, Fabian, Pierre)"`, etc.
+- `_LABEL_TO_BENEFICIARY`: reverse mapping for saving
+- `_convert_items_to_sheets()`: converts DataFrame rows with display labels to sheets-compatible records
+- SelectboxColumn options use `_BENEFICIARY_LABELS.values()`
+- `beneficiary_to_split_type()` / `split_type_to_beneficiary()` helpers in `app/models.py`
+
+### Authentication (`app/services/auth.py`) — NEW FILE
+- Google Sheets-backed user store (Users worksheet)
+- Password hashing via `werkzeug.security` (`generate_password_hash`, `check_password_hash`)
+- Auto-seeds default users if Users sheet is empty: shin/fabian/pierre, password: **changeme**
+- Functions: `verify_user()`, `change_password()`, `_ensure_users_sheet()`
+
+### Login UI (`dashboard.py` sidebar)
+- Login form with username/password → calls `verify_user()` from auth service
+- Logged-in state shows name + logout button
+- "Change password" expander with form submitting to `change_password()`
+- Guest-mode indicator: "Viewing as guest — login to upload receipts."
+
+### Payer Auto-Assignment & Guest Mode
+- When logged in, `Paid_By` auto-assigned to `logged_in_name`
+- Tab list dynamic: "Upload Receipt" only shown when logged in
+- Guests see "View History" (renamed from "Edit History") instead
+
+### Dependencies
+- Added `werkzeug>=3.0.0` to `requirements.txt`
 
 ---
 

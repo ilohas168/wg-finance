@@ -28,15 +28,45 @@ st.set_page_config(page_title="WG Sharehouse Hub", layout="wide", page_icon="")
 # Session-state helpers                                                        #
 # --------------------------------------------------------------------------- #
 
-_DEFAULT_ROOMMATES = ["Roommate 1", "Roommate 2", "Roommate 3"]
-_ROOMMATE_INITIALS = {"Roommate 1": "A", "Roommate 2": "B", "Roommate 3": "C"}
+# --------------------------------------------------------------------------- #
+# Named roommates — A=Shin, B=Fabian, C=Pierre                               #
+# --------------------------------------------------------------------------- #
+
+_DEFAULT_ROOMMATES = ["Shin", "Fabian", "Pierre"]
+_ROOMMATE_INITIALS = {"Shin": "A", "Fabian": "B", "Pierre": "C"}
+
+# Display labels for beneficiary values (mapped from internal codes A/B/C/AB/BC/AC/ALL).
+_BENEFICIARY_LABELS: dict[str, str] = {
+    "ALL": "All (Shin, Fabian, Pierre)",
+    "A": "Shin",
+    "B": "Fabian",
+    "C": "Pierre",
+    "AB": "Shin & Fabian",
+    "BC": "Fabian & Pierre",
+    "AC": "Shin & Pierre",
+}
+
+# Reverse mapping: display label → internal beneficiary code.
+_LABEL_TO_BENEFICIARY = {v: k for k, v in _BENEFICIARY_LABELS.items()}
+
+
+def _convert_items_to_sheets(items_df: pd.DataFrame) -> list[dict]:
+    """Convert a DataFrame with *display* labels to sheets-compatible records."""
+    records = []
+    for _, row in items_df.iterrows():
+        r = dict(row)
+        ben = str(r.get("Beneficiary", "ALL"))
+        if ben in _LABEL_TO_BENEFICIARY:
+            r["Beneficiary"] = _LABEL_TO_BENEFICIARY[ben]
+        records.append(r)
+    return records
 
 
 def _init_session() -> None:
     """Ensure all required keys exist in ``st.session_state``."""
     defaults = {
-        "selected_user": "Roommate 1",
-        "current_tab": "Upload Receipt",
+        "selected_user": "Shin",
+        "current_tab": "Upload Receipt" if "logged_in_user" in st.session_state else "View History",
         "raw_items_df": None,
         "parsed_dict": None,
         "has_parsed": False,
@@ -55,6 +85,54 @@ _init_session()
 
 with st.sidebar:
     st.title("WG Sharehouse Hub")
+
+    # ------------------------------------------------------------------ #
+    # Login / logout                                                       #
+    # ------------------------------------------------------------------ #
+    logged_in = st.session_state.get("logged_in_user")
+
+    if not logged_in:
+        with st.form("login_form"):
+            st.subheader("Login")
+            _uname = st.text_input("Username", key="login_username")
+            _pw = st.text_input("Password", type="password", key="login_password")
+            if st.form_submit_button("Login"):
+                from app.services.auth import verify_user  # noqa: E402
+
+                name = verify_user(_uname, _pw)
+                if name:
+                    st.session_state.logged_in_user = _uname
+                    st.session_state.logged_in_name = name
+                    st.success(f"Welcome, {name}!")
+                else:
+                    st.error("Invalid credentials.")
+        with st.expander("Forgot password?"):
+            st.caption("Contact Shin to reset your password via the Google Sheet.")
+    else:
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            st.success(f"Logged in as **{st.session_state.logged_in_name}**")
+        with c2:
+            if st.button("Logout", use_container_width=True):
+                del st.session_state.logged_in_user
+                del st.session_state.logged_in_name
+                st.rerun()
+        with st.expander("Change password"):
+            with st.form("change_pw_form"):
+                _old = st.text_input("Current password", type="password", key="old_pw")
+                _new = st.text_input("New password", type="password", key="new_pw")
+                _confirm = st.text_input("Confirm new password", type="password", key="confirm_pw")
+                if st.form_submit_button("Update"):
+                    if _new != _confirm:
+                        st.error("Passwords don't match.")
+                    else:
+                        from app.services.auth import change_password  # noqa: E402
+
+                        if change_password(logged_in, _old, _new):
+                            st.success("Password updated!")
+                        else:
+                            st.error("Could not update password. Contact Shin.")
+
     st.divider()
     today = date.today()
     default_start = today.replace(day=1) if today.day > 1 else today - __import__("datetime").timedelta(days=today.day - 1)
@@ -69,8 +147,19 @@ with st.sidebar:
         index=_DEFAULT_ROOMMATES.index(st.session_state.selected_user) if st.session_state.selected_user in _DEFAULT_ROOMMATES else 0,
         key="selected_user",
     )
+
+    # Guest-mode hint.
+    if not logged_in:
+        st.info("Viewing as guest — login to upload receipts.")
+
     st.divider()
-    tabs = ["Upload Receipt", "Edit History", "Balances & Settlements", "Parent Reports"]
+
+    # Dynamic tab list — Tab 1 only visible when logged in.
+    if logged_in:
+        tabs = ["Upload Receipt", "Edit History", "Balances & Settlements", "Parent Reports"]
+    else:
+        tabs = ["View History", "Balances & Settlements", "Parent Reports"]
+
     selected_tab = st.radio(
         "Page",
         options=tabs,
@@ -93,6 +182,7 @@ def _clean_df_for_sheets(df: pd.DataFrame) -> pd.DataFrame:
 
     - String / object columns → ""
     - Numeric columns → 0
+    - Convert Beneficiary display labels back to internal codes.
     """
     df = df.copy()
     # Fill string/object cols with ""
@@ -103,6 +193,11 @@ def _clean_df_for_sheets(df: pd.DataFrame) -> pd.DataFrame:
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     for col in num_cols:
         df[col] = df[col].fillna(0).astype(float)
+    # Convert Beneficiary display labels back to internal codes.
+    if "Beneficiary" in df.columns:
+        df["Beneficiary"] = df["Beneficiary"].apply(
+            lambda v: _LABEL_TO_BENEFICIARY.get(str(v), str(v))
+        )
     return df
 
 
@@ -211,6 +306,15 @@ if selected_tab == "Upload Receipt":
         st.session_state.raw_items_df = df
 
         st.subheader("Line-items")
+        # Display labels for the Beneficiary column.
+        _ben_options = list(_BENEFICIARY_LABELS.values())  # e.g. ["All (Shin…)", "Shin", ...]
+
+        # Convert internal codes → display labels for the editor.
+        if "Beneficiary" in df.columns:
+            df["Beneficiary"] = df["Beneficiary"].apply(
+                lambda v: _BENEFICIARY_LABELS.get(str(v), str(v))
+            )
+
         col_config = {
             "Product_Name": st.column_config.TextColumn("Name", width="medium"),
             "Category": st.column_config.SelectboxColumn(
@@ -227,14 +331,14 @@ if selected_tab == "Upload Receipt":
                 width="small",
             ),
             "Beneficiary": st.column_config.SelectboxColumn(
-                "Beneficiary",
-                options=["ALL", "A", "B", "C", "AB", "BC", "AC"],
-                width="small",
+                "Who pays for this item",
+                options=_ben_options,
+                width="medium",
             ),
         }
 
         edited_df = st.data_editor(
-            df,
+            df.copy(),  # pass a copy so the lambda mutation doesn't persist
             column_config=col_config,
             column_order=list(col_config.keys()),
             hide_index=True,
@@ -254,13 +358,33 @@ if selected_tab == "Upload Receipt":
         summary = _summarise_receipt(edited_df, header_disc)
         m1, m2, m3, m4 = st.columns(4)
         with m1:
-            st.metric("Shared Total", f"${summary['shared_total']:,.2f}")
+            st.metric("Shared Total", f"CHF {summary['shared_total']:,.2f}")
         with m2:
-            st.metric("Per-Roommate Share", f"${summary['per_roommate_share']:,.2f}")
+            st.metric("Per-Roommate Share", f"CHF {summary['per_roommate_share']:,.2f}")
         with m3:
-            st.metric("Personal Total", f"${summary['personal_total']:,.2f}")
+            st.metric("Personal Total", f"CHF {summary['personal_total']:,.2f}")
         with m4:
-            st.metric("Grand Total", f"${summary['grand_total']:,.2f}")
+            st.metric("Grand Total", f"CHF {summary['grand_total']:,.2f}")
+
+        # Grand total validation — compare line items sum vs receipt total.
+        parsed_total = st.session_state.parsed_dict.get("total_amount", 0.0) if st.session_state.parsed_dict else 0.0
+        computed_sum = float(edited_df["Line_Total"].sum())
+        discrepancy = abs(computed_sum - parsed_total)
+
+        st.divider()
+        st.subheader("Validation")
+        if parsed_total and discrepancy > 0.1:
+            st.warning(
+                f"Items total (CHF {computed_sum:,.2f}) differs from "
+                f"receipt total (CHF {parsed_total:,.2f}). "
+                f"Discrepancy: CHF {discrepancy:,.2f}. "
+                f"Please adjust items before saving."
+            )
+        else:
+            st.info(
+                f"Items total (CHF {computed_sum:,.2f}) matches receipt total "
+                f"(CHF {parsed_total:,.2f}). ✓"
+            )
 
         # Save.
         col_save, _ = st.columns([1, 5])
@@ -273,11 +397,18 @@ if selected_tab == "Upload Receipt":
                     clean_df = _clean_df_for_sheets(edited_df)
                     from app.services.ledger import save_receipt  # type: ignore
 
+                    # Payer auto-assignment (Phase 5): logged-in user is payer.
+                    _payer = (
+                        st.session_state.logged_in_name
+                        if st.session_state.get("logged_in_user")
+                        else selected_user
+                    )
+
                     receipt_data = {
                         "Receipt_ID": f"REC-{datetime.now():%Y%m%d-%H%M%S}",
                         "Date": st.session_state.parsed_dict.get("date", datetime.now().strftime("%Y-%m-%d")),
                         "Store": st.session_state.parsed_dict.get("merchant", ""),
-                        "Paid_By": selected_user,
+                        "Paid_By": _payer,
                         "Header_Discounts": header_disc,
                         "Grand_Total": summary["grand_total"],
                         "Shared_Total": summary["shared_total"],
@@ -327,6 +458,13 @@ elif selected_tab == "Edit History":
                     df_items["Line_Total"] = _compute_line_totals(df_items)
 
                     st.subheader("Line-items")
+                    _ben_options = list(_BENEFICIARY_LABELS.values())
+
+                    # Convert internal codes → display labels for the editor.
+                    df_items["Beneficiary"] = df_items["Beneficiary"].apply(
+                        lambda v: _BENEFICIARY_LABELS.get(str(v), str(v))
+                    )
+
                     col_config = {
                         "Product_Name": st.column_config.TextColumn("Name", width="medium"),
                         "Category": st.column_config.SelectboxColumn(
@@ -343,9 +481,9 @@ elif selected_tab == "Edit History":
                             width="small",
                         ),
                         "Beneficiary": st.column_config.SelectboxColumn(
-                            "Beneficiary",
-                            options=["ALL", "A", "B", "C", "AB", "BC", "AC"],
-                            width="small",
+                            "Who pays for this item",
+                            options=_ben_options,
+                            width="medium",
                         ),
                     }
                     edited_df = st.data_editor(
@@ -494,7 +632,7 @@ elif selected_tab == "Balances & Settlements":
                 status = "green" if val > 0 else "red" if val < -0.01 else "gray"
                 st.metric(
                     rm,
-                    f"${abs(val):,.2f}",
+                    f"CHF {abs(val):,.2f}",
                     delta=f"{'Owes' if val < -0.01 else 'Is owed' if val > 0.01 else 'Settled'}",
                     delta_color="inverse" if val < 0 else "normal",
                 )
@@ -579,7 +717,7 @@ elif selected_tab == "Parent Reports":
             df_roommate = df_filtered
 
         # Show total metric
-        st.metric("Total Spent by Selected Roommate", f"${df_roommate['Grand_Total'].sum():,.2f}" if "Grand_Total" in df_roommate.columns else "$0.00")
+        st.metric("Total Spent by Selected Roommate", f"CHF {df_roommate['Grand_Total'].sum():,.2f}" if "Grand_Total" in df_roommate.columns else "CHF 0.00")
 
         st.divider()
 
