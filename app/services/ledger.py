@@ -38,73 +38,11 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 # Helpers                                                              #
 # ------------------------------------------------------------------ #
 
-def _sanitize_json_for_streamlit_secrets(raw: str) -> str:
-    """Escape literal newlines / carriage-returns inside JSON string values.
-
-    Streamlit Cloud stores multi-line secret values with real newline (0x0A)
-    characters that are **not** valid JSON control characters even under
-    ``strict=False``.  We walk the text character-by-character and escape
-    them when they appear inside quoted strings so the result can be parsed
-    by Python's ``json.loads()``.
-    """
-    if not raw:
-        return raw
-
-    out: list[str] = []
-    in_str = False      # are we currently inside a JSON string?
-    escape_next = False  # was the previous char a backslash?
-    i = 0
-
-    while i < len(raw):
-        c = raw[i]
-
-        if escape_next:
-            out.append(c)
-            escape_next = False
-            i += 1
-            continue
-
-        if c == '\\':
-            # Inside a string, backslash starts an escape sequence.
-            if in_str:
-                out.append('\\\\')  # keep existing escape literal
-                out.append(c)       # the actual backslash char
-            else:
-                out.append(c)
-            escape_next = True
-            i += 1
-            continue
-
-        if c == '"':
-            in_str = not in_str
-            out.append(c)
-            i += 1
-            continue
-
-        if c in ('\n', '\r'):
-            if in_str:
-                # Inside a string → escape it.
-                out.append('\\')
-                out.append('n' if c == '\n' else 'r')
-            else:
-                # Outside any string → replace with space to avoid breaking
-                # JSON structure (e.g. between array elements).
-                out.append(' ')
-            i += 1
-            continue
-
-        out.append(c)
-        i += 1
-
-    return ''.join(out)
-
-
 def _unescape_private_key(info: dict) -> dict:
     """Replace literal ``\\n`` in *info[\"private_key\"]* with real newlines.
 
-    Streamlit Cloud serialises secrets as JSON; a newline inside the
-    service-account ``private_key`` becomes the two-character sequence
-    ``\\n`` which the Google library cannot parse.  We fix it up here.
+    Google's auth library requires actual newline characters inside the private
+    key PEM string, not the two-character escape sequence ``\\n``.
     """
     if "private_key" in info:
         raw = str(info["private_key"])
@@ -170,16 +108,26 @@ def _get_gspread_client() -> GSpreadClient:
         if not raw or not raw.strip().startswith("{"):
             continue
         try:
-            # Streamlit Cloud stores multi-line secrets with literal newlines
-            # inside JSON string values → escape them so ``json.loads()`` can
-            # parse the result.
-            sanitized = _sanitize_json_for_streamlit_secrets(raw)
-            info = json.loads(sanitized, strict=False)
-            client = _authorise(_unescape_private_key(dict(info)), "GOOGLE_CREDENTIALS_JSON")
-            if client:
-                return client
-        except json.JSONDecodeError:
-            logger.exception("Failed to parse GOOGLE_CREDENTIALS_JSON as JSON.")
+            info = json.loads(raw, strict=False)
+        except json.JSONDecodeError as e:
+            # If the error is caused by literal newlines (from Streamlit Cloud
+            # TOML triple-quoted secrets), provide a helpful message.
+            if "\n" in raw or "\r" in raw:
+                logger.warning(
+                    "GOOGLE_CREDENTIALS_JSON contains literal newline characters. "
+                    "Please paste the service-account JSON as a **single line** in "
+                    "Streamlit Cloud Settings → Secrets.\n"
+                    "Error: %s", e,
+                )
+            else:
+                logger.exception(
+                    "Failed to parse GOOGLE_CREDENTIALS_JSON as JSON. "
+                    "Check that it is valid JSON (no trailing commas, proper quoting)."
+                )
+            continue
+        client = _authorise(_unescape_private_key(dict(info)), "GOOGLE_CREDENTIALS_JSON")
+        if client:
+            return client
 
     # ---- c. GOOGLE_CREDENTIALS_FILE (file path) --------------------- #
     file_sources = [
