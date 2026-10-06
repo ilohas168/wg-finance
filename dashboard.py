@@ -111,8 +111,11 @@ with st.sidebar:
                     st.success(f"Welcome, {payload}!")
                 elif result_code == RESULT_DB_ERROR:
                     st.error(
-                        f"Unable to connect to Google Sheets authentication "
-                        f"table. Please verify Streamlit Cloud Secrets.",
+                        "Unable to connect to Google Sheets authentication table. "
+                        "Please check **Streamlit Cloud Secrets** (Settings → Secrets) and ensure:\n"
+                        "- ``GOOGLE_CREDENTIALS_JSON`` contains the full service-account JSON on one line, or\n"
+                        "- ``gcp_service_account`` is a TOML dict (not a raw string).\n"
+                        "Check app logs for the specific parse error.",
                     )
                 else:
                     # RESULT_BAD_CREDS — wrong username or password.
