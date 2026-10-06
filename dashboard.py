@@ -213,7 +213,7 @@ if selected_tab == "Upload Receipt":
         st.subheader("Line-items")
         col_config = {
             "Product_Name": st.column_config.TextColumn("Name", width="medium"),
-            "Category": st.column_config.DropdownColumn(
+            "Category": st.column_config.SelectboxColumn(
                 "Category",
                 options=["Food", "Drink", "Toiletries", "Household", "General"],
                 width="small",
@@ -329,7 +329,7 @@ elif selected_tab == "Edit History":
                     st.subheader("Line-items")
                     col_config = {
                         "Product_Name": st.column_config.TextColumn("Name", width="medium"),
-                        "Category": st.column_config.DropdownColumn(
+                        "Category": st.column_config.SelectboxColumn(
                             "Category",
                             options=["Food", "Drink", "Toiletries", "Household", "General"],
                             width="small",

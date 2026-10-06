@@ -8,6 +8,7 @@ vision models.  If the first candidate raises a 404 it falls back automatically.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from typing import Any, Dict, List, Optional, Sequence, Literal
 
 import groq
 from groq import NotFoundError
+from PIL import Image
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -68,8 +70,6 @@ _VISION_MODEL_CANDIDATES: list[str] = [
     "meta-llama/llama-4-scout-17b-16e-instruct",
     "qwen/qwen3.8-27b",
 ]
-
-_SYSTEM_PROMPT: str = ""
 
 _SYSTEM_PROMPT: str = """You are a receipt parsing assistant for a 3-person sharehouse.\n
 Extract every line-item from this receipt image into structured JSON.\n\n
@@ -144,6 +144,46 @@ def _strip_markdown_json(raw: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Image compression                                                            #
+# --------------------------------------------------------------------------- #
+
+_MAX_DIM = 1600   # Max width/height for Groq Vision input (avoids 413 errors)
+_JPEG_QUALITY = 85
+
+
+def _compress_image(image_bytes: bytes) -> bytes:
+    """Load an image, downscale if needed, and export as a compressed JPEG.
+
+    This prevents the Groq ``BadRequestError`` 413 "REQUEST ENTITY TOO LARGE"
+    when roommates send high-resolution camera photos.
+
+    Parameters
+    ----------
+    image_bytes :
+        Raw bytes (PNG, JPEG, HEIC, etc.).
+
+    Returns
+    -------
+    bytes
+        Compressed JPEG bytes ready for base64 encoding.
+    """
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    max_dim = max(img.size)
+
+    if max_dim <= _MAX_DIM:
+        return io.BytesIO(img.save(None, format="JPEG", quality=_JPEG_QUALITY, optimize=True).getvalue())
+
+    # Downscale preserving aspect ratio
+    ratio = _MAX_DIM / max_dim
+    new_size = (int(img.width * ratio), int(img.height * ratio))
+    img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
+    return out.getvalue()
+
+
+# --------------------------------------------------------------------------- #
 # Public API                                                                   #
 # --------------------------------------------------------------------------- #
 
@@ -174,7 +214,11 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
     for model_name in candidates:
         logger.info("vision_line_items: trying model '%s'", model_name)
         client = _get_client()
-        b64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+        # --- Image compression to avoid 413 "REQUEST ENTITY TOO LARGE" ---
+        image_bytes_compressed = _compress_image(image_bytes)
+
+        b64_image = base64.b64encode(image_bytes_compressed).decode("utf-8")
         image_data_url = f"data:image/jpeg;base64,{b64_image}"
 
         for attempt in range(1, 4):
