@@ -58,54 +58,105 @@ def _unescape_private_key(info: dict) -> dict:
 # ------------------------------------------------------------------ #
 
 def _get_gspread_client() -> GSpreadClient:
-    """Authenticate and return a gspread Client from service account JSON."""
+    """Authenticate and return a gspread Client from service account credentials.
 
-    # -- 1. Service-account file path ----------------------------------- #
-    cred_path = os.environ.get("GOOGLE_CREDENTIALS_FILE", "")
-    if cred_path:
-        expanded = os.path.expanduser(cred_path)
-        if os.path.isfile(expanded):
-            try:
-                creds = Credentials.from_service_account_file(
-                    expanded, scopes=_SCOPES,
-                )
-                return gspread.authorize(creds)
-            except Exception:
-                logger.exception(
-                    "Failed to load service-account file: %s", expanded,
-                )
+    Credential sources are checked in priority order:
 
-    # -- 2. Inline JSON env var ----------------------------------------- #
-    cred_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
-    if cred_json and cred_json.startswith("{"):
+    a. ``st.secrets["gcp_service_account"]``  -- TOML dict section (Streamlit)
+    b. ``st.secrets["GOOGLE_CREDENTIALS_JSON"]`` or ``GOOGLE_CREDENTIALS_JSON`` env var
+       -- raw JSON string
+    c. ``st.secrets["GOOGLE_CREDENTIALS_FILE"]`` or ``GOOGLE_CREDENTIALS_FILE`` env var
+       -- file path to a service-account key
+    d. Local file fallback (``wg-finance-bot-6112de07abed.json``, ``credentials.json``)
+    """
+
+    # ---- helper to try and authorise from a parsed info dict ---------- #
+    def _authorise(info: dict, source: str) -> GSpreadClient | None:
+        """Try to create credentials from *info* dict.  Returns client or None."""
         try:
-            info = json.loads(cred_json)
-            info = _unescape_private_key(info)
             creds = Credentials.from_service_account_info(info, scopes=_SCOPES)
+            logger.info("Successfully loaded credentials from %s", source)
             return gspread.authorize(creds)
         except Exception:
-            logger.exception(
-                "Failed to load GOOGLE_CREDENTIALS_JSON (inline JSON). "
-                "Check that the private-key contains real newlines (not \\n)."
-            )
+            logger.exception("Failed to create credentials from %s (key may be malformed).", source)
+            return None
 
-    # -- 3. Streamlit secrets (dict form, e.g. ``gcp_service_account``) -#
+    # ---- a. Streamlit TOML dict ("gcp_service_account") --------------- #
     try:
         import streamlit as st  # type: ignore[import-not-found]
-        secret = getattr(st, "secrets", {}).get("gcp_service_account", {})
+        secret = getattr(st, "secrets", {}).get("gcp_service_account")
         if isinstance(secret, dict):
-            info = _unescape_private_key(dict(secret))
-            creds = Credentials.from_service_account_info(info, scopes=_SCOPES)
-            return gspread.authorize(creds)
+            client = _authorise(_unescape_private_key(dict(secret)), "st.secrets['gcp_service_account']")
+            if client:
+                return client
     except ImportError:
-        pass  # not in a Streamlit context — skip.
-    except Exception:
-        logger.exception("Failed to load ``gcp_service_account`` from Streamlit secrets.")
+        pass  # not in Streamlit context
+
+    # ---- b. GOOGLE_CREDENTIALS_JSON (raw JSON string) ---------------- #
+    json_sources = [
+        os.environ.get("GOOGLE_CREDENTIALS_JSON"),
+    ]
+    # Also check Streamlit secrets key "GOOGLE_CREDENTIALS_JSON".
+    try:
+        import streamlit as st  # type: ignore[import-not-found]
+        st_val = getattr(st, "secrets", {}).get("GOOGLE_CREDENTIALS_JSON")
+        if isinstance(st_val, str):
+            json_sources.append(st_val)
+    except (ImportError, AttributeError):
+        pass
+
+    for raw in json_sources:
+        if not raw or not raw.strip().startswith("{"):
+            continue
+        try:
+            info = json.loads(raw)
+            client = _authorise(_unescape_private_key(dict(info)), "GOOGLE_CREDENTIALS_JSON")
+            if client:
+                return client
+        except json.JSONDecodeError:
+            logger.exception("Failed to parse GOOGLE_CREDENTIALS_JSON as JSON.")
+
+    # ---- c. GOOGLE_CREDENTIALS_FILE (file path) --------------------- #
+    file_sources = [
+        os.environ.get("GOOGLE_CREDENTIALS_FILE"),
+    ]
+    try:
+        import streamlit as st  # type: ignore[import-not-found]
+        st_val = getattr(st, "secrets", {}).get("GOOGLE_CREDENTIALS_FILE")
+        if isinstance(st_val, str):
+            file_sources.append(st_val)
+    except (ImportError, AttributeError):
+        pass
+
+    for path in file_sources:
+        if not path:
+            continue
+        expanded = os.path.expanduser(str(path).strip())
+        if os.path.isfile(expanded):
+            try:
+                creds = Credentials.from_service_account_file(expanded, scopes=_SCOPES)
+                logger.info("Successfully loaded credentials from GOOGLE_CREDENTIALS_FILE: %s", expanded)
+                return gspread.authorize(creds)
+            except Exception:
+                logger.exception("Failed to load service-account file: %s", expanded)
+
+    # ---- d. Local file fallback -------------------------------------- #
+    for local_name in ("wg-finance-bot-6112de07abed.json", "credentials.json"):
+        local_path = os.path.expanduser(os.path.join(os.path.dirname(__file__), "..", "..", local_name))
+        if os.path.isfile(local_path):
+            try:
+                creds = Credentials.from_service_account_file(local_path, scopes=_SCOPES)
+                logger.info("Successfully loaded credentials from local file: %s", local_name)
+                return gspread.authorize(creds)
+            except Exception:
+                logger.exception("Failed to load local credential file: %s", local_name)
 
     raise RuntimeError(
-        "Neither GOOGLE_CREDENTIALS_JSON (file path or JSON blob), a "
-        "GOOGLE_CREDENTIALS_FILE, nor ``st.secrets[\"gcp_service_account\"]`` "
-        "was found. See app/services/ledger.py docstring."
+        "No service-account credentials found. Set one of:\n"
+        "  st.secrets[\"gcp_service_account\"] (dict),\n"
+        "  GOOGLE_CREDENTIALS_JSON (JSON string),\n"
+        "  GOOGLE_CREDENTIALS_FILE or st.secrets[\"GOOGLE_CREDENTIALS_FILE\"] (file path).\n"
+        "See app/services/ledger.py docstring for details."
     )
 
 
