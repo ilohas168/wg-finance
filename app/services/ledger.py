@@ -8,6 +8,7 @@ Handles the three core operations:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime
@@ -30,6 +31,27 @@ from app.models import (
 
 logger = logging.getLogger(__name__)
 
+_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+
+# ------------------------------------------------------------------ #
+# Helpers                                                              #
+# ------------------------------------------------------------------ #
+
+def _unescape_private_key(info: dict) -> dict:
+    """Replace literal ``\\n`` in *info[\"private_key\"]* with real newlines.
+
+    Streamlit Cloud serialises secrets as JSON; a newline inside the
+    service-account ``private_key`` becomes the two-character sequence
+    ``\\n`` which the Google library cannot parse.  We fix it up here.
+    """
+    if "private_key" in info:
+        raw = str(info["private_key"])
+        if "\\n" in raw:
+            info = dict(info)  # shallow copy to avoid mutating the original
+            info["private_key"] = raw.replace("\\n", "\n")
+    return info
+
 
 # ------------------------------------------------------------------ #
 # Google Sheets client factory                                         #
@@ -37,27 +59,53 @@ logger = logging.getLogger(__name__)
 
 def _get_gspread_client() -> GSpreadClient:
     """Authenticate and return a gspread Client from service account JSON."""
-    cred_val = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 
-    if cred_val and os.path.isfile(os.path.expanduser(cred_val)):
-        creds = Credentials.from_service_account_file(
-            os.path.expanduser(cred_val), scopes=["https://www.googleapis.com/auth/spreadsheets"],
-        )
-        return gspread.authorize(creds)
+    # -- 1. Service-account file path ----------------------------------- #
+    cred_path = os.environ.get("GOOGLE_CREDENTIALS_FILE", "")
+    if cred_path:
+        expanded = os.path.expanduser(cred_path)
+        if os.path.isfile(expanded):
+            try:
+                creds = Credentials.from_service_account_file(
+                    expanded, scopes=_SCOPES,
+                )
+                return gspread.authorize(creds)
+            except Exception:
+                logger.exception(
+                    "Failed to load service-account file: %s", expanded,
+                )
 
-    # Fallback: inline JSON env var.
-    if cred_val and cred_val.startswith("{"):
-        import json
-        info = json.loads(cred_val)
-        creds = Credentials.from_service_account_info(info, scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-        ])
-        return gspread.authorize(creds)
+    # -- 2. Inline JSON env var ----------------------------------------- #
+    cred_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+    if cred_json and cred_json.startswith("{"):
+        try:
+            info = json.loads(cred_json)
+            info = _unescape_private_key(info)
+            creds = Credentials.from_service_account_info(info, scopes=_SCOPES)
+            return gspread.authorize(creds)
+        except Exception:
+            logger.exception(
+                "Failed to load GOOGLE_CREDENTIALS_JSON (inline JSON). "
+                "Check that the private-key contains real newlines (not \\n)."
+            )
+
+    # -- 3. Streamlit secrets (dict form, e.g. ``gcp_service_account``) -#
+    try:
+        import streamlit as st  # type: ignore[import-not-found]
+        secret = getattr(st, "secrets", {}).get("gcp_service_account", {})
+        if isinstance(secret, dict):
+            info = _unescape_private_key(dict(secret))
+            creds = Credentials.from_service_account_info(info, scopes=_SCOPES)
+            return gspread.authorize(creds)
+    except ImportError:
+        pass  # not in a Streamlit context — skip.
+    except Exception:
+        logger.exception("Failed to load ``gcp_service_account`` from Streamlit secrets.")
 
     raise RuntimeError(
-        "Neither GOOGLE_CREDENTIALS_JSON (file path or JSON blob) nor a "
-        "service-account key was found. Set GOOGLE_CREDENTIALS_JSON to the path "
-        "of your service-account JSON file (e.g. credentials.json)."
+        "Neither GOOGLE_CREDENTIALS_JSON (file path or JSON blob), a "
+        "GOOGLE_CREDENTIALS_FILE, nor ``st.secrets[\"gcp_service_account\"]`` "
+        "was found. See app/services/ledger.py docstring."
     )
 
 
@@ -101,9 +149,6 @@ def _get_sheet_id() -> str:
       2. ``GOOGLE_SHEET_ID`` environment variable
       3. Hard-coded known-good default
     """
-    # In a non-Streamlit context ``st`` may not be available at all, so we
-    # only look for it lazily — this also avoids importing streamlit on the
-    # webhook (FastAPI) side where gspread would run.
     try:
         import streamlit as st  # type: ignore[import-not-found]
         val = getattr(st, "secrets", {}).get("GOOGLE_SHEET_ID")
@@ -120,7 +165,7 @@ def _get_sheet_id() -> str:
 
 
 # ------------------------------------------------------------------ #
-# New Google Sheets helpers
+# New Google Sheets helpers                                            #
 # ------------------------------------------------------------------ #
 
 def _open_sheet() -> gspread.Spreadsheet:
@@ -130,8 +175,19 @@ def _open_sheet() -> gspread.Spreadsheet:
         raise RuntimeError(
             "Set GOOGLE_SHEET_ID environment variable to the target Sheet ID."
         )
-    client = _get_gspread_client()
-    return client.open_by_key(sheet_id)
+    try:
+        client = _get_gspread_client()
+    except Exception:
+        logger.exception("Failed to create Google Sheets client.")
+        raise
+    try:
+        return client.open_by_key(sheet_id)
+    except Exception:
+        logger.exception(
+            "open_by_key(%r) failed — verify GOOGLE_SHEET_ID and service-account permissions.",
+            sheet_id,
+        )
+        raise
 
 
 def _ensure_all_worksheets() -> dict[str, gspread.Worksheet]:
