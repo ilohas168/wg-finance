@@ -15,6 +15,7 @@ each public function, wrapped in try/except to avoid crashing on import.
 from __future__ import annotations
 
 import logging
+from typing import List, Optional, Tuple
 
 from werkzeug.security import generate_password_hash, check_password_hash  # type: ignore[import]
 
@@ -71,7 +72,6 @@ def _ensure_users_sheet() -> None:
         rows_to_add = []
         for username, password in _DEFAULT_PASSWORDS.items():
             try:
-                # Username is already lowercase key; ensure lowercased for safety.
                 user_lower = str(username).strip().lower()
                 display_name = user_lower.title()
                 hashed = generate_password_hash(password)
@@ -88,7 +88,44 @@ def _ensure_users_sheet() -> None:
                 logger.warning("Could not append seeded rows to Users worksheet.")
 
 
-def verify_user(username: str, password: str) -> tuple[str, str | None]:
+def _get_users_df() -> Optional[List[list]]:
+    """Read all rows from the ``Users`` worksheet.
+
+    Returns a list-of-rows (each row is a list of strings) on success,
+    or **``None``** when the sheet cannot be reached or an error occurs.
+    **Never returns an empty DataFrame / list.**  Callers must distinguish
+    "no connection" (``None``) from "no users found" (length < 2).
+    """
+    # Lazy import to avoid circular dependency and support standalone auth imports.
+    from app.services.ledger import _get_gspread_client  # noqa: F401
+
+    try:
+        client = _get_gspread_client()
+    except Exception:
+        logger.warning("Could not connect to Google Sheets for user lookup.")
+        return None
+
+    try:
+        ws = client.worksheet("Users")
+    except Exception:
+        logger.warning("Users worksheet is unavailable.")
+        return None
+
+    try:
+        values = ws.get_all_values()
+    except Exception:
+        logger.warning("Could not read Users worksheet values.")
+        return None
+
+    # Empty or missing headers → treat as unreachable.
+    if not values:
+        logger.warning("Users worksheet returned no rows at all.")
+        return None
+
+    return values
+
+
+def verify_user(username: str, password: str) -> Tuple[str, Optional[str]]:
     """Verify credentials against the ``Users`` sheet.
 
     Returns a ``(result_code, payload)`` pair:
@@ -96,41 +133,31 @@ def verify_user(username: str, password: str) -> tuple[str, str | None]:
     * ``(RESULT_OK, display_name)`` — login succeeded.
     * ``(RESULT_BAD_CREDS, None)``  — wrong username or password.
     * ``(RESULT_DB_ERROR, message)`` — couldn't reach the Users worksheet.
+
+    Connection failures are **never** mistaken for bad credentials.
     """
+    # Ensure the Users sheet is seeded before attempting login.
     _ensure_users_sheet()
 
-    from app.services.ledger import _open_sheet
-
-    # --- Open connection -------------------------------------------------- #
-    try:
-        client = _open_sheet()
-    except Exception as exc:
-        return RESULT_DB_ERROR, f"Unable to connect to Google Sheets authentication table. Please verify Streamlit Cloud Secrets."
-
-    # --- Fetch worksheet -------------------------------------------------- #
-    try:
-        ws = client.worksheet("Users")
-    except Exception:
-        return RESULT_DB_ERROR, "Authentication table (Users sheet) is unavailable. Try again later."
-
-    try:
-        values = ws.get_all_values()
-    except Exception:
-        return RESULT_DB_ERROR, "Could not read authentication data from the Google Sheet."
+    values = _get_users_df()
+    if values is None:
+        return RESULT_DB_ERROR, (
+            "Unable to connect to Google Sheets authentication table. "
+            "Please verify Streamlit Cloud Secrets."
+        )
 
     if len(values) < 2:
         # Table has only headers or is empty — treat as no such user.
         return RESULT_BAD_CREDS, None
 
-    # --- Locate columns from headers -------------------------------------- #
+    # Locate columns from headers.
     headers = [str(h).strip().lower() for h in values[0]]
     uname_idx = headers.index("username") if "username" in headers else 0
     pw_idx = headers.index("passwordhash") if "passwordhash" in headers else 1
 
-    # Normalise input username.
     username_lower = username.strip().lower()
 
-    # --- Compare against every row ---------------------------------------- #
+    # Compare against every row.
     for row in values[1:]:
         if len(row) <= max(uname_idx, pw_idx):
             continue
@@ -142,8 +169,12 @@ def verify_user(username: str, password: str) -> tuple[str, str | None]:
         stored_hash = str(row[pw_idx])
         try:
             if check_password_hash(stored_hash, password):
-                name_col = min(pw_idx + 1, len(values[0]) - 1) if len(values[0]) > pw_idx + 1 else uname_idx
-                display_name = str(row[name_col]) if len(row) > name_col else username.title()
+                name_col = min(
+                    pw_idx + 1, len(values[0]) - 1
+                ) if len(values[0]) > pw_idx + 1 else uname_idx
+                display_name = (
+                    str(row[name_col]) if len(row) > name_col else username.title()
+                )
                 return RESULT_OK, display_name
         except Exception:
             logger.warning("Password verification failed for %s", username_lower)
@@ -152,29 +183,16 @@ def verify_user(username: str, password: str) -> tuple[str, str | None]:
     return RESULT_BAD_CREDS, None
 
 
-def change_password(username: str, old_password: str, new_password: str) -> tuple[bool, str]:
+def change_password(username: str, old_password: str, new_password: str) -> Tuple[bool, str]:
     """Update a user's password in the ``Users`` sheet.
 
     Returns ``(success: bool, message: str)``.
     """
     _ensure_users_sheet()
 
-    from app.services.ledger import _open_sheet
-
-    try:
-        client = _open_sheet()
-    except Exception:
-        return False, "Unable to connect to Google Sheets."
-
-    try:
-        ws = client.worksheet("Users")
-    except Exception:
-        return False, "Authentication table (Users sheet) is unavailable."
-
-    try:
-        values = ws.get_all_values()
-    except Exception:
-        return False, "Could not read authentication data from the Google Sheet."
+    values = _get_users_df()
+    if values is None:
+        return False, "Unable to connect to Google Sheets authentication table."
 
     if len(values) < 2:
         return False, "No users found in the Authentication table."
@@ -184,6 +202,14 @@ def change_password(username: str, old_password: str, new_password: str) -> tupl
     pw_idx = headers.index("passwordhash") if "passwordhash" in headers else 1
 
     username_lower = username.strip().lower()
+
+    # Locate and update the worksheet row for this user.
+    try:
+        from app.services.ledger import _open_sheet
+        client = _open_sheet()
+        ws = client.worksheet("Users")
+    except Exception:
+        return False, "Unable to connect to Google Sheets."
 
     # Find the row (1-indexed for gspread operations).
     for i, row in enumerate(values[1:], start=2):

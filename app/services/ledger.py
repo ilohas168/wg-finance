@@ -109,7 +109,7 @@ def _get_gspread_client() -> GSpreadClient:
         if not raw or not raw.strip().startswith("{"):
             continue
         try:
-            info = json.loads(raw)
+            info = json.loads(raw, strict=False)
             client = _authorise(_unescape_private_key(dict(info)), "GOOGLE_CREDENTIALS_JSON")
             if client:
                 return client
