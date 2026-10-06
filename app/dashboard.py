@@ -45,7 +45,24 @@ from google.oauth2.service_account import Credentials
 # Configuration                                                               #
 # --------------------------------------------------------------------------- #
 
-SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "")
+_KNOWN_SHEET_ID = "18oTLJ8Fpe_XKBdSwV0lTKe2ptSaRLIRHj_9JF0jsBq0"
+
+
+def _get_sheet_id() -> str:
+    """Resolve GOOGLE_SHEET_ID from Streamlit secrets, env, or known default."""
+    try:
+        import streamlit as st  # type: ignore[import-not-found]
+        val = getattr(st, "secrets", {}).get("GOOGLE_SHEET_ID")
+        if val:
+            return str(val)
+    except (ImportError, AttributeError):
+        pass
+    val = os.environ.get("GOOGLE_SHEET_ID", "")
+    return str(val) if val else _KNOWN_SHEET_ID
+
+
+SHEET_ID = _get_sheet_id()
+
 _CREDENTIAL_PATHS = [
     os.environ.get("GOOGLE_CREDENTIALS_FILE", ""),
     os.path.join(os.path.dirname(__file__), "..", "credentials.json"),

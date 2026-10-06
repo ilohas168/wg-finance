@@ -87,12 +87,45 @@ _SETTLEMENT_HEADERS = [
 
 
 # ------------------------------------------------------------------ #
+# Sheet ID resolution (env → Streamlit secrets → known default)       #
+# ------------------------------------------------------------------ #
+
+_KNOWN_SHEET_ID = "18oTLJ8Fpe_XKBdSwV0lTKe2ptSaRLIRHj_9JF0jsBq0"
+
+
+def _get_sheet_id() -> str:
+    """Resolve the Google Sheet ID from multiple sources.
+
+    Priority (highest to lowest):
+      1. ``st.secrets["GOOGLE_SHEET_ID"]``   (when running inside Streamlit)
+      2. ``GOOGLE_SHEET_ID`` environment variable
+      3. Hard-coded known-good default
+    """
+    # In a non-Streamlit context ``st`` may not be available at all, so we
+    # only look for it lazily — this also avoids importing streamlit on the
+    # webhook (FastAPI) side where gspread would run.
+    try:
+        import streamlit as st  # type: ignore[import-not-found]
+        val = getattr(st, "secrets", {}).get("GOOGLE_SHEET_ID")
+        if val:
+            return str(val)
+    except (ImportError, AttributeError):
+        pass
+
+    val = os.environ.get("GOOGLE_SHEET_ID", "")
+    if val:
+        return str(val)
+
+    return _KNOWN_SHEET_ID
+
+
+# ------------------------------------------------------------------ #
 # New Google Sheets helpers
 # ------------------------------------------------------------------ #
 
 def _open_sheet() -> gspread.Spreadsheet:
     """Open the sharehouse ledger spreadsheet by ``GOOGLE_SHEET_ID``."""
-    sheet_id = os.environ.get("GOOGLE_SHEET_ID", "")
+    sheet_id = _get_sheet_id()
     if not sheet_id:
         raise RuntimeError(
             "Set GOOGLE_SHEET_ID environment variable to the target Sheet ID."
