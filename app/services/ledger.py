@@ -304,7 +304,8 @@ def _ensure_all_worksheets() -> dict[str, gspread.Worksheet]:
     # Define required worksheets
     required_sheets = ["Receipts", "Receipt_Items", "Settlements"]
 
-    # Create any missing worksheets
+    # Create missing worksheets and repair tabs left without headers by an
+    # interrupted earlier initialization.
     worksheets = {}
     for sheet_name in required_sheets:
         if sheet_name not in existing_names:
@@ -326,30 +327,87 @@ def _ensure_all_worksheets() -> dict[str, gspread.Worksheet]:
             logger.info(f"Created new '{sheet_name}' worksheet with headers.")
         else:
             worksheet = spreadsheet.worksheet(sheet_name)
+            expected_headers = {
+                "Receipts": _RECEIPT_HEADERS,
+                "Receipt_Items": _LINE_ITEMS_HEADERS_V2,
+                "Settlements": _SETTLEMENT_HEADERS,
+            }[sheet_name]
+            current_headers = _normalize_sheet_headers(
+                worksheet.row_values(1), expected_headers
+            )
+            if not any(header in expected_headers for header in current_headers):
+                worksheet.insert_row(expected_headers, index=1)
+                logger.info("Restored missing headers in '%s' worksheet.", sheet_name)
 
         worksheets[sheet_name] = worksheet
 
     return worksheets
 
 
+def _header_key(value: Any) -> str:
+    """Normalize a sheet header for matching despite spaces/case/punctuation."""
+    return "".join(char.lower() for char in str(value) if char.isalnum())
+
+
+def _normalize_sheet_headers(
+    raw_headers: Sequence[Any], expected_headers: Sequence[str]
+) -> list[str]:
+    """Map known header spellings to the canonical worksheet column names."""
+    expected_by_key = {_header_key(header): header for header in expected_headers}
+    normalized: list[str] = []
+    used: set[str] = set()
+    for index, raw_header in enumerate(raw_headers, start=1):
+        text = str(raw_header).strip()
+        header = expected_by_key.get(_header_key(text), text or f"Column_{index}")
+        if header in used:
+            header = f"{header}_{index}"
+        used.add(header)
+        normalized.append(header)
+    return normalized
+
+
 def get_all_receipts() -> pd.DataFrame:
     """Read all receipts from the 'Receipts' sheet."""
+    empty = pd.DataFrame(columns=_RECEIPT_HEADERS)
     try:
         spreadsheet = _open_sheet()
         worksheet = spreadsheet.worksheet("Receipts")
         values = worksheet.get_all_values()
 
-        if not values or len(values) < 2:
-            # Return empty DataFrame with required columns
-            return pd.DataFrame(columns=_RECEIPT_HEADERS)
+        if not values:
+            return empty
 
-        # First row is headers
-        df = pd.DataFrame(values[1:], columns=values[0])
+        raw_headers = values[0]
+        normalized_headers = _normalize_sheet_headers(raw_headers, _RECEIPT_HEADERS)
+        if not any(header in _RECEIPT_HEADERS for header in normalized_headers):
+            # A prior failed sheet setup can leave receipt rows in row 1 with
+            # no header. Insert headers without overwriting those rows.
+            worksheet.insert_row(_RECEIPT_HEADERS, index=1)
+            values = worksheet.get_all_values()
+            if len(values) < 2:
+                return empty
+            raw_headers = values[0]
+            normalized_headers = _normalize_sheet_headers(raw_headers, _RECEIPT_HEADERS)
+
+        width = max([len(normalized_headers), *(len(row) for row in values[1:])])
+        normalized_headers.extend(
+            f"Column_{index + 1}"
+            for index in range(len(normalized_headers), width)
+        )
+        rows = [row + [""] * (width - len(row)) for row in values[1:]]
+        df = pd.DataFrame(rows, columns=normalized_headers)
+        df = df.loc[:, ~df.columns.duplicated()].copy()
+        for header in _RECEIPT_HEADERS:
+            if header not in df.columns:
+                df[header] = ""
+        df = df[_RECEIPT_HEADERS + [col for col in df.columns if col not in _RECEIPT_HEADERS]]
+        if "Receipt_ID" in df.columns:
+            df = df[df["Receipt_ID"].astype(str).str.strip() != ""]
         return df
     except Exception as e:
         logger.error(f"Error reading receipts: {e}")
         # Return empty DataFrame with required columns
-        return pd.DataFrame(columns=_RECEIPT_HEADERS)
+        return empty
 
 
 def get_receipt_items(receipt_id: str = None) -> pd.DataFrame:

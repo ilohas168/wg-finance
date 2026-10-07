@@ -491,7 +491,7 @@ elif selected_tab == "Edit History":
         st.error(f"Failed to load receipts: {exc}")
         df_receipts = pd.DataFrame(columns=["Receipt_ID", "Date", "Store"])
 
-    if not df_receipts.empty:
+    if not df_receipts.empty and "Receipt_ID" in df_receipts.columns:
         receipt_ids = [str(r) for r in df_receipts["Receipt_ID"].tolist()]
         selected_rid = st.selectbox("Select Receipt", options=receipt_ids, key="edit_receipt_select")
 
@@ -601,7 +601,7 @@ elif selected_tab == "Balances & Settlements":
         df_receipts = pd.DataFrame(columns=["Receipt_ID", "Date", "Store", "Paid_By"])
         df_settlements = pd.DataFrame(columns=["Settlement_ID", "Date", "From_Roommate", "To_Roommate", "Amount", "Method"])
 
-    if not df_receipts.empty:
+    if not df_receipts.empty and "Receipt_ID" in df_receipts.columns:
         # Build balance dictionary per roommate
         balances = {rm: 0.0 for rm in _DEFAULT_ROOMMATES}
 
