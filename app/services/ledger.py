@@ -559,6 +559,32 @@ def update_receipt(receipt_id: str, receipt_data: dict, items: list[dict]):
         raise
 
 
+def update_receipt_date(receipt_id: str, receipt_date: str) -> None:
+    """Update only a receipt's date without rewriting its items or totals."""
+    spreadsheet = _open_sheet()
+    worksheet = spreadsheet.worksheet("Receipts")
+    values = worksheet.get_all_values()
+    if not values or len(values) < 2:
+        raise ValueError(f"No receipts found to update for {receipt_id}")
+
+    headers = _normalize_sheet_headers(values[0], _RECEIPT_HEADERS)
+    try:
+        receipt_id_column = headers.index("Receipt_ID") + 1
+        date_column = headers.index("Date") + 1
+    except ValueError as exc:
+        raise ValueError("The Receipts sheet is missing its ID or Date column") from exc
+
+    for row_number, row in enumerate(values[1:], start=2):
+        if (
+            len(row) >= receipt_id_column
+            and row[receipt_id_column - 1].strip() == receipt_id
+        ):
+            worksheet.update_cell(row_number, date_column, receipt_date)
+            return
+
+    raise ValueError(f"Receipt {receipt_id} was not found")
+
+
 def delete_receipt(receipt_id: str) -> tuple[int, int]:
     """Delete one receipt and its line items from Google Sheets.
 

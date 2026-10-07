@@ -634,6 +634,9 @@ elif selected_tab == "Past Receipts":
     delete_message = st.session_state.pop("receipt_delete_message", None)
     if delete_message:
         st.success(delete_message)
+    receipt_date_message = st.session_state.pop("receipt_date_message", None)
+    if receipt_date_message:
+        st.success(receipt_date_message)
 
     try:
         with st.spinner("Loading receipts…"):
@@ -736,6 +739,34 @@ elif selected_tab == "Past Receipts":
                         "Allocated item shares differ from the receipt total by "
                         f"CHF {selected_difference / 100:,.2f}. Correct the line items before saving."
                     )
+
+                current_date = parse_receipt_dates(
+                    pd.Series([selected_receipt.get("Date", "")])
+                ).iloc[0]
+                date_default = (
+                    current_date.date() if pd.notna(current_date) else date.today()
+                )
+                edited_receipt_date = st.date_input(
+                    "Receipt date",
+                    value=date_default,
+                    key=f"receipt_date_{selected_rid}",
+                )
+                st.caption("This date determines which month appears in Total Spendings.")
+                if st.button("Save receipt date", key=f"save_receipt_date_{selected_rid}"):
+                    try:
+                        with st.spinner("Updating receipt date…"):
+                            from app.services.ledger import update_receipt_date  # type: ignore
+
+                            update_receipt_date(
+                                selected_rid,
+                                edited_receipt_date.isoformat(),
+                            )
+                        st.session_state["receipt_date_message"] = (
+                            f"Updated {selected_rid} to {edited_receipt_date.isoformat()}."
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Error updating receipt date: {exc}")
 
                 if not df_items.empty:
                     # Older saves truncated weighed-item quantities to integers.
