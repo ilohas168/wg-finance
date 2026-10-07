@@ -97,18 +97,18 @@ def _get_users_df() -> Optional[List[list]]:
     "no connection" (``None``) from "no users found" (length < 2).
     """
     # Lazy import to avoid circular dependency and support standalone auth imports.
-    from app.services.ledger import _get_gspread_client  # noqa: F401
+    from app.services.ledger import _open_sheet
 
     try:
-        client = _get_gspread_client()
+        spreadsheet = _open_sheet()
     except Exception:
         logger.warning("Could not connect to Google Sheets for user lookup.")
         return None
 
     try:
-        ws = client.worksheet("Users")
-    except Exception:
-        logger.warning("Users worksheet is unavailable.")
+        ws = spreadsheet.worksheet("Users")
+    except Exception as exc:
+        logger.warning("Users worksheet is unavailable: %s", exc)
         return None
 
     try:
