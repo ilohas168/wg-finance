@@ -88,6 +88,14 @@ Read the receipt carefully, especially the final amount at the bottom:
 - For Swiss receipts with Artikel, Menge, Preis, Aktion, and Total columns,
   read each physical row horizontally. Return one item per printed row, in the
   same order. Never move a number to the row above or below it.
+- Transcribe each product name as it is printed, preserving its spelling,
+  capitalization, abbreviations, and visible truncation. Do not autocorrect,
+  translate, expand, or replace an unfamiliar name with a likely product name.
+  If a character is genuinely unreadable, mark only that character with `?`;
+  do not guess the rest of the name.
+- The user may provide several overlapping crops of the same receipt. Treat
+  them as consecutive views of one receipt, combine their rows in top-to-bottom
+  order, and include any row visible in an overlap only once.
 - Read qty from Menge, including fractional weights such as 0.420 kg. Read
   price from the rightmost Total column on that same row. Preis is the unit
   price; Aktion is informational. Do not multiply Total by qty or subtract
@@ -145,34 +153,23 @@ def _strip_markdown_json(raw: str) -> str:
 # --------------------------------------------------------------------------- #
 
 _MAX_INLINE_IMAGE_BYTES = 6 * 1024 * 1024
+_MAX_CROP_IMAGE_BYTES = 768 * 1024
 _JPEG_QUALITY = 95
 
 
-def _prepare_image(image_bytes: bytes) -> tuple[bytes, str]:
-    """Preserve image detail and only recompress when needed for the API limit.
-
-    JPEG inputs below the inline-image budget are passed through unchanged.
-    PNG and oversized or unsupported inputs are encoded as quality-95 JPEGs at
-    their original dimensions first, then downscaled only if still oversized.
-    """
-    with Image.open(io.BytesIO(image_bytes)) as source:
-        image_format = (source.format or "").upper()
-        if image_format == "JPEG" and len(image_bytes) <= _MAX_INLINE_IMAGE_BYTES:
-            return image_bytes, "image/jpeg"
-
-        image = ImageOps.exif_transpose(source).convert("RGB")
-
+def _encode_image(image: Image.Image, max_bytes: int) -> bytes:
+    """Encode an image as high-quality JPEG, reducing it only when necessary."""
     quality = _JPEG_QUALITY
     for _ in range(12):
         out = io.BytesIO()
         image.save(out, format="JPEG", quality=quality, optimize=True)
         encoded = out.getvalue()
-        if len(encoded) <= _MAX_INLINE_IMAGE_BYTES:
-            return encoded, "image/jpeg"
+        if len(encoded) <= max_bytes:
+            return encoded
 
         max_dim = max(image.size)
         if max_dim > 1200:
-            scale = min(0.95, math.sqrt(_MAX_INLINE_IMAGE_BYTES / len(encoded)) * 0.95)
+            scale = min(0.95, math.sqrt(max_bytes / len(encoded)) * 0.95)
             new_size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
             image = image.resize(new_size, Image.Resampling.LANCZOS)
         elif quality > 75:
@@ -181,6 +178,32 @@ def _prepare_image(image_bytes: bytes) -> tuple[bytes, str]:
             break
 
     raise ValueError("Could not reduce the receipt image below Groq's image request limit.")
+
+
+def _prepare_images(image_bytes: bytes) -> list[tuple[bytes, str]]:
+    """Prepare one image or three overlapping detail crops for a tall receipt.
+
+    Tall images are split into three overlapping, full-width crops. This makes
+    each printed row larger for OCR while preserving receipt order. Each crop
+    is capped at 768 KiB so the combined base64 request stays compact.
+    """
+    with Image.open(io.BytesIO(image_bytes)) as source:
+        image_format = (source.format or "").upper()
+        image = ImageOps.exif_transpose(source).convert("RGB")
+
+    # Keep compact, non-tall JPEGs byte-for-byte. For tall receipts, close
+    # detail crops give the vision model more readable text per image.
+    is_tall = image.height / image.width >= 1.25
+    if not is_tall and image_format == "JPEG" and len(image_bytes) <= _MAX_INLINE_IMAGE_BYTES:
+        return [(image_bytes, "image/jpeg")]
+
+    if not is_tall:
+        return [(_encode_image(image, _MAX_INLINE_IMAGE_BYTES), "image/jpeg")]
+
+    crop_height = max(1, (image.height + 1) // 2)
+    starts = (0, (image.height - crop_height) // 2, image.height - crop_height)
+    crops = [image.crop((0, top, image.width, top + crop_height)) for top in starts]
+    return [(_encode_image(crop, _MAX_CROP_IMAGE_BYTES), "image/jpeg") for crop in crops]
 
 
 # --------------------------------------------------------------------------- #
@@ -216,9 +239,16 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
         client = _get_client()
 
         # Preserve dimensions and text detail; use JPEG to keep payloads compact.
-        prepared_image, image_mime_type = _prepare_image(image_bytes)
-        b64_image = base64.b64encode(prepared_image).decode("utf-8")
-        image_data_url = f"data:{image_mime_type};base64,{b64_image}"
+        prepared_images = _prepare_images(image_bytes)
+        image_content = [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{base64.b64encode(image).decode('utf-8')}"
+                },
+            }
+            for image, mime_type in prepared_images
+        ]
 
         for attempt in range(1, 4):
             try:
@@ -230,7 +260,7 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
                             "role": "user",
                             "content": [
                                 {"type": "text", "text": "Parse this receipt. Return structured JSON."},
-                                {"type": "image_url", "image_url": {"url": image_data_url}},
+                                *image_content,
                             ],
                         },
                     ],
@@ -281,10 +311,7 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
                                                 "Do not invent a balancing item, duplicate an Aktion discount, or add tax twice."
                                             ),
                                         },
-                                        {
-                                            "type": "image_url",
-                                            "image_url": {"url": image_data_url},
-                                        },
+                                        *image_content,
                                     ],
                                 },
                             ],

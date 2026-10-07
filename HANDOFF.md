@@ -85,10 +85,11 @@ Balance < 0 → this person owes others money.
 - **IMPORTANT:** Was previously defined as parenthesized implicit string concatenation with blank lines between blocks. This caused a Python 3.13 `SyntaxError: invalid syntax` because implicit concat inside parentheses breaks when blank lines separate adjacent strings on this platform.
 - **Fix applied:** Converted to a single triple-quoted raw string (`"""..."""`) — one continuous assignment, no gaps. See commit `41f5b29`.
 
-### Vision Parser Image Preparation (`_prepare_image()` helper)
+### Vision Parser Image Preparation (`_prepare_images()` helper)
 - **Purpose:** Preserve receipt text detail while staying below Groq's image request limit.
-- JPEG inputs up to 6 MiB pass through unchanged. PNG and oversized inputs are converted to JPEG at quality 95 while preserving original dimensions whenever they fit the request budget.
-- Larger converted images are resized only as much as needed to fit the request budget. Qwen 3.8 is the primary vision model.
+- Non-tall JPEG inputs up to 6 MiB pass through unchanged. PNG and oversized inputs are converted to JPEG at quality 95 while preserving original dimensions whenever they fit the request budget.
+- Tall images are sent as three overlapping, full-width crops, each capped at 768 KiB. This gives the vision model larger receipt text while keeping the combined request compact; the prompt asks it to preserve printed names verbatim and deduplicate rows repeated in overlaps.
+- Other converted images are resized only as much as needed to fit the request budget. Qwen 3.8 is the primary vision model.
 
 ---
 
