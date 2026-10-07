@@ -20,18 +20,16 @@ The old flat "Transactions / Summary Ledger" sheets remain as audit trail. The n
 
 ### Balance Calculation Formula
 
-For each line-item row in a receipt where payer = X:
+For each receipt where payer = X:
 
-1. **Payer out-of-pocket credit:** `Balance_X += Line_Total`
-2. **Shared item (Split_Type == "Shared"):**  
-   `n_beneficiaries = len(beneficiary_str)`  (3 for ALL, 2 for AB/BC/AC, 1 for single letter)  
-   For each beneficiary Y ≠ X: `Balance_Y -= Line_Total / n_beneficiaries`
-3. **Private item (Split_Type == "Private"):**  
-   For the specific beneficiary Y: `Balance_Y -= Line_Total`
+1. **Payer out-of-pocket credit:** `Balance_X += Grand_Total`.
+2. Allocate each signed line total evenly to its beneficiaries, including the payer: `Balance_Y -= share`. `ALL` means A, B, and C; AB/BC/AC mean the named pair; a single letter means that one roommate.
+3. Distribute a receipt-wide header discount in proportion to positive item spending. Shares are allocated in integer cents.
+4. The dashboard warns when allocated item shares do not equal the printed receipt total; correct the receipt rows before relying on that balance.
 
 **Settlements:**
-- `Balance_From -= amount`  (sender's balance goes down)
-- `Balance_To += amount`    (receiver's balance goes up)
+- `Balance_From += amount`  (the payer's debt decreases)
+- `Balance_To -= amount`    (the recipient's credit decreases)
 
 **Interpretation:**  
 Balance > 0 → others owe this person money.  
@@ -48,6 +46,7 @@ Balance < 0 → this person owes others money.
 | `save_receipt(receipt_data, items)` | `(dict, list[dict]) -> str` | Append header to Receipts + rows to Receipt_Items. Returns receipt_id. |
 | `update_receipt(receipt_id, data, items)` | `(str, dict, list[dict])` | Find + delete old matching rows (bottom→top), re-append corrected data. |
 | `append_settlement(frm, to, amt, method)` | `(str, str, float, str) -> str` | Append row to Settlements sheet. Returns settlement_id. |
+| `delete_receipt(receipt_id)` | `(str) -> tuple[int, int]` | Atomically delete the receipt row and associated item rows. |
 
 ### Legacy Functions (removed in refactor)
 - `append_transactions()` — wrote to old Transactions sheet
@@ -110,14 +109,16 @@ Balance < 0 → this person owes others money.
 - Summary metrics: Shared Total, Per-Roommate Share, Personal Total, Grand Total
 - "Save to Google Sheets" → calls `ledger.save_receipt(receipt_data, items)`
 
-### Tab 2 — Edit History
+### Tab 2 — Past Receipts
+- Shows each receipt's printed total, item total, and allocated share per roommate.
 - Dropdown of all receipt_ids from `get_all_receipts()`
 - On selection → loads items via `get_receipt_items(receipt_id)` into `st.data_editor` (same columns as Tab 1)
 - "Update Receipt" button → calls `ledger.update_receipt(id, data, items)`
+- Confirmed delete removes a receipt and its item rows together.
 
 ### Tab 3 — Balances & Settlements
-- Computes per-roommate balances from Receipts + Receipt_Items sheets using the formula in §1
-- Who-owes-whom matrix (cross-tab of positive/negative balance diffs)
+- Computes per-roommate balances from signed line totals, payer credits, and beneficiary allocations using the formula in §1
+- Who-owes-whom settlement plan without duplicate debtor/creditor pairings
 - Settlement logging form: From/To (selectbox), Amount (number input), Method (Bank Transfer / Twint / Cash)
 
 ### Tab 4 — Parent Reports
@@ -247,7 +248,7 @@ All map to the same internal A/B/C ratios as legacy SPLIT types.
 ### Payer Auto-Assignment & Guest Mode
 - When logged in, `Paid_By` auto-assigned to `logged_in_name`
 - Tab list dynamic: "Upload Receipt" only shown when logged in
-- Guests see "View History" (renamed from "Edit History") instead
+- Guests see "View History"; signed-in users see "Past Receipts".
 
 ### Dependencies
 - Added `werkzeug>=3.0.0` to `requirements.txt`

@@ -493,7 +493,7 @@ def save_receipt(receipt_data: dict, items: list[dict]) -> str:
             item.get("Paid_By", ""),
             item.get("Product_Name", ""),
             item.get("Category", ""),
-            int(item.get("Qty", 1)),
+            float(item.get("Qty", 1)),
             float(item.get("Unit_Price", 0)),
             float(item.get("Discount", 0)),
             float(item.get("Line_Total", 0)),

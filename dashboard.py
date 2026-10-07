@@ -3,7 +3,7 @@
 Pages:
   1. **Upload Receipt** — upload / camera-capture a receipt, parse with Groq
      vision, edit line-items in-place, then save to Google Sheets (new schema).
-  2. **Edit History** — browse historical receipts, edit line-items, resave.
+  2. **Past Receipts** — browse historical receipts, see roommate shares, edit or delete.
   3. **Balances & Settlements** — per-roommate balances, who-owes-whom matrix,
      settlement tracking.
   4. **Parent Reports** — filtered expense history with total-spent metric and CSV export.
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
@@ -170,8 +171,10 @@ with st.sidebar:
     st.divider()
 
     # Dynamic tab list — Tab 1 only visible when logged in.
+    if st.session_state.get("current_tab") == "Edit History":
+        st.session_state["current_tab"] = "Past Receipts"
     if logged_in:
-        tabs = ["Upload Receipt", "Edit History", "Balances & Settlements", "Parent Reports"]
+        tabs = ["Upload Receipt", "Past Receipts", "Balances & Settlements", "Parent Reports"]
     else:
         tabs = ["View History", "Balances & Settlements", "Parent Reports"]
 
@@ -187,15 +190,149 @@ with st.sidebar:
 # --------------------------------------------------------------------------- #
 
 
-def _get_roommate_label(user: str) -> str:
-    """Get the initial (A/B/C) for a roommate."""
-    return _ROOMMATE_INITIALS.get(user, "X")
-
-
 def _beneficiary_code(value: Any) -> str:
     """Normalize a beneficiary display label or code to A/B/C/AB/BC/AC/ALL."""
     code = _LABEL_TO_BENEFICIARY.get(str(value), str(value))
     return code if code in {"A", "B", "C", "AB", "BC", "AC", "ALL"} else "ALL"
+
+
+def _roommate_code(value: Any) -> Optional[str]:
+    """Resolve a roommate name or code to the internal A/B/C code."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip().casefold()
+    for roommate, code in _ROOMMATE_INITIALS.items():
+        if text in {roommate.casefold(), code.casefold()}:
+            return code
+    return None
+
+
+def _money_to_cents(value: Any) -> int:
+    """Convert a sheet value to integer cents with normal currency rounding."""
+    try:
+        amount = Decimal(str(value).strip())
+        if not amount.is_finite():
+            return 0
+        return int((amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
+
+
+def _line_total_cents(item: Any) -> int:
+    """Read a saved line total, deriving it only when the cell is blank."""
+    line_total = item.get("Line_Total", "")
+    if line_total is not None and str(line_total).strip() != "":
+        return _money_to_cents(line_total)
+    try:
+        amount = (
+            Decimal(str(item.get("Qty", 1)))
+            * Decimal(str(item.get("Unit_Price", 0)))
+            - Decimal(str(item.get("Discount", 0)))
+        )
+        return _money_to_cents(amount)
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
+
+
+def _beneficiary_codes(value: Any) -> list[str]:
+    """Return every roommate code responsible for an item's cost."""
+    code = _beneficiary_code(value)
+    return ["A", "B", "C"] if code == "ALL" else [part for part in "ABC" if part in code]
+
+
+def _split_cents(amount_cents: int, beneficiary_codes: list[str]) -> dict[str, int]:
+    """Split cents exactly, assigning any remainder in stable roommate order."""
+    if not beneficiary_codes:
+        beneficiary_codes = ["A", "B", "C"]
+    sign = -1 if amount_cents < 0 else 1
+    quotient, remainder = divmod(abs(amount_cents), len(beneficiary_codes))
+    return {
+        code: sign * (quotient + (1 if index < remainder else 0))
+        for index, code in enumerate(beneficiary_codes)
+    }
+
+
+def _receipt_spending_cents(
+    items_df: pd.DataFrame, header_discount_cents: int = 0
+) -> dict[str, int]:
+    """Allocate a receipt's net cost among the selected beneficiaries."""
+    spending = {code: 0 for code in "ABC"}
+    if items_df.empty:
+        return spending
+    for _, item in items_df.iterrows():
+        amount = _line_total_cents(item)
+        for code, share in _split_cents(
+            amount, _beneficiary_codes(item.get("Beneficiary", "ALL"))
+        ).items():
+            spending[code] += share
+
+    # A receipt-wide discount is apportioned by each roommate's positive item
+    # spending, with any leftover cents assigned by largest fractional share.
+    if header_discount_cents > 0:
+        weights = {code: max(0, amount) for code, amount in spending.items()}
+        weight_total = sum(weights.values())
+        if weight_total:
+            allocations = {}
+            remainders = {}
+            for code in "ABC":
+                allocations[code], remainders[code] = divmod(
+                    header_discount_cents * weights[code], weight_total
+                )
+            cents_left = header_discount_cents - sum(allocations.values())
+            for code in sorted("ABC", key=lambda key: (-remainders[key], "ABC".index(key)))[:cents_left]:
+                allocations[code] += 1
+            for code in "ABC":
+                spending[code] -= allocations[code]
+    return spending
+
+
+def _calculate_balance_cents(
+    receipts_df: pd.DataFrame,
+    items_df: pd.DataFrame,
+    settlements_df: pd.DataFrame,
+    default_payer: str,
+) -> dict[str, int]:
+    """Compute net debts/credits using payer credits and beneficiary shares."""
+    balances = {code: 0 for code in "ABC"}
+    if not receipts_df.empty and "Receipt_ID" in receipts_df.columns:
+        for _, receipt in receipts_df.iterrows():
+            receipt_id = str(receipt.get("Receipt_ID", "")).strip()
+            if not receipt_id or items_df.empty or "Receipt_ID" not in items_df.columns:
+                continue
+            receipt_items = items_df[
+                items_df["Receipt_ID"].astype(str).str.strip() == receipt_id
+            ]
+            payer = _roommate_code(receipt.get("Paid_By")) or _roommate_code(default_payer)
+            if not payer:
+                continue
+            header_discount = _money_to_cents(receipt.get("Header_Discounts", 0))
+            shares = _receipt_spending_cents(receipt_items, header_discount)
+            receipt_total = receipt.get("Grand_Total", "")
+            paid_cents = (
+                _money_to_cents(receipt_total)
+                if receipt_total is not None and str(receipt_total).strip()
+                else sum(shares.values())
+            )
+            balances[payer] += paid_cents
+            for code, share in shares.items():
+                balances[code] -= share
+
+    if not settlements_df.empty:
+        for _, settlement in settlements_df.iterrows():
+            sender = _roommate_code(settlement.get("From_Roommate"))
+            receiver = _roommate_code(settlement.get("To_Roommate"))
+            amount = _money_to_cents(settlement.get("Amount", 0))
+            if sender and receiver and sender != receiver and amount > 0:
+                # Positive means owed; paying a debt raises the sender's balance
+                # toward zero and lowers the recipient's credit toward zero.
+                balances[sender] += amount
+                balances[receiver] -= amount
+    return balances
 
 
 def _split_type_for_beneficiary(value: Any) -> str:
@@ -476,12 +613,12 @@ if selected_tab == "Upload Receipt":
 
 
 # =========================================================================== #
-# Tab 2 — Edit History                                                         #
+# Tab 2 — Past Receipts                                                        #
 # =========================================================================== #
 
-elif selected_tab == "Edit History":
-    st.title("Edit History")
-    st.caption("Browse and edit historical receipts.")
+elif selected_tab == "Past Receipts":
+    st.title("Past Receipts")
+    st.caption("Review receipt totals and each roommate's allocated spending; edit or delete receipts.")
     if st.session_state.pop("clear_edit_receipt_select", False):
         st.session_state.pop("edit_receipt_select", None)
     delete_message = st.session_state.pop("receipt_delete_message", None)
@@ -492,24 +629,124 @@ elif selected_tab == "Edit History":
         with st.spinner("Loading receipts…"):
             from app.services.ledger import get_all_receipts, get_receipt_items  # type: ignore
             df_receipts = get_all_receipts()
+            df_all_items = get_receipt_items()
     except Exception as exc:
         st.error(f"Failed to load receipts: {exc}")
         df_receipts = pd.DataFrame(columns=["Receipt_ID", "Date", "Store"])
+        df_all_items = pd.DataFrame(columns=["Receipt_ID", "Line_Total", "Beneficiary"])
 
     if not df_receipts.empty and "Receipt_ID" in df_receipts.columns:
+        st.subheader("Receipt totals and roommate spending")
+        summary_rows = []
+        for _, receipt in df_receipts.iterrows():
+            rid = str(receipt.get("Receipt_ID", "")).strip()
+            if "Receipt_ID" in df_all_items.columns:
+                receipt_items = df_all_items[
+                    df_all_items["Receipt_ID"].astype(str).str.strip() == rid
+                ]
+            else:
+                receipt_items = df_all_items.iloc[0:0]
+            header_discount = _money_to_cents(receipt.get("Header_Discounts", 0))
+            shares = _receipt_spending_cents(receipt_items, header_discount)
+            receipt_total_cents = _money_to_cents(receipt.get("Grand_Total", 0))
+            allocated_total_cents = sum(shares.values())
+            summary_rows.append(
+                {
+                    "Receipt ID": rid,
+                    "Date": receipt.get("Date", ""),
+                    "Store": receipt.get("Store", ""),
+                    "Paid By": receipt.get("Paid_By", ""),
+                    "Receipt Total (CHF)": receipt_total_cents / 100,
+                    "Allocated Total (CHF)": allocated_total_cents / 100,
+                    "Difference (CHF)": (allocated_total_cents - receipt_total_cents) / 100,
+                    "Shin Share (CHF)": shares["A"] / 100,
+                    "Fabian Share (CHF)": shares["B"] / 100,
+                    "Pierre Share (CHF)": shares["C"] / 100,
+                }
+            )
+        if summary_rows:
+            st.dataframe(
+                pd.DataFrame(summary_rows),
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    column: st.column_config.NumberColumn(column, format="%.2f")
+                    for column in [
+                        "Receipt Total (CHF)",
+                        "Allocated Total (CHF)",
+                        "Difference (CHF)",
+                        "Shin Share (CHF)",
+                        "Fabian Share (CHF)",
+                        "Pierre Share (CHF)",
+                    ]
+                },
+            )
+            if any(
+                abs(_money_to_cents(row["Receipt Total (CHF)"]) - _money_to_cents(row["Allocated Total (CHF)"])) > 1
+                for row in summary_rows
+            ):
+                st.warning(
+                    "At least one receipt's item total differs from its printed receipt total. "
+                    "Review those line items in Past Receipts before relying on its split."
+                )
+
         receipt_ids = [str(r) for r in df_receipts["Receipt_ID"].tolist()]
         selected_rid = st.selectbox("Select Receipt", options=receipt_ids, key="edit_receipt_select")
 
         if selected_rid:
             try:
-                with st.spinner("Loading items…"):
-                    from app.services.ledger import get_receipt_items  # type: ignore
-                    df_items = get_receipt_items(selected_rid)
+                df_items = df_all_items[
+                    df_all_items["Receipt_ID"].astype(str).str.strip() == selected_rid
+                ].copy() if "Receipt_ID" in df_all_items.columns else df_all_items.iloc[0:0].copy()
+
+                receipt_row = df_receipts[
+                    df_receipts["Receipt_ID"].astype(str).str.strip() == selected_rid
+                ]
+                selected_receipt = receipt_row.iloc[0] if not receipt_row.empty else pd.Series(dtype=object)
+                selected_shares = _receipt_spending_cents(
+                    df_items,
+                    _money_to_cents(selected_receipt.get("Header_Discounts", 0)),
+                )
+                share_cols = st.columns(5)
+                with share_cols[0]:
+                    st.metric(
+                        "Receipt Total",
+                        f"CHF {_money_to_cents(selected_receipt.get('Grand_Total', 0)) / 100:,.2f}",
+                    )
+                with share_cols[1]:
+                    st.metric("Allocated Total", f"CHF {sum(selected_shares.values()) / 100:,.2f}")
+                for col, name, code in zip(share_cols[2:], _DEFAULT_ROOMMATES, "ABC"):
+                    with col:
+                        st.metric(f"{name}'s Share", f"CHF {selected_shares[code] / 100:,.2f}")
+                selected_difference = sum(selected_shares.values()) - _money_to_cents(
+                    selected_receipt.get("Grand_Total", 0)
+                )
+                if abs(selected_difference) > 1:
+                    st.warning(
+                        "Allocated item shares differ from the receipt total by "
+                        f"CHF {selected_difference / 100:,.2f}. Correct the line items before saving."
+                    )
 
                 if not df_items.empty:
                     for col in ["Qty", "Unit_Price", "Discount", "Line_Total"]:
                         if col in df_items.columns:
                             df_items[col] = pd.to_numeric(df_items[col], errors="coerce").fillna(0)
+                    # Older saves truncated weighed-item quantities to integers.
+                    # Recover them from the saved line total and unit price so
+                    # opening/editing a past receipt does not change its value.
+                    if {"Qty", "Unit_Price", "Discount", "Line_Total"}.issubset(df_items.columns):
+                        inferred_qty = (
+                            df_items["Line_Total"] + df_items["Discount"]
+                        ) / df_items["Unit_Price"].replace(0, float("nan"))
+                        formula_total = (
+                            df_items["Qty"] * df_items["Unit_Price"] - df_items["Discount"]
+                        )
+                        recover_qty = (
+                            (df_items["Unit_Price"] > 0)
+                            & (inferred_qty > 0)
+                            & ((formula_total - df_items["Line_Total"]).abs() > 0.01)
+                        )
+                        df_items.loc[recover_qty, "Qty"] = inferred_qty.loc[recover_qty]
                     df_items["Line_Total"] = _compute_line_totals(df_items)
 
                     st.subheader("Line-items")
@@ -644,87 +881,39 @@ elif selected_tab == "Edit History":
 
 elif selected_tab == "Balances & Settlements":
     st.title("Balances & Settlements")
-    st.caption("Track who owes whom based on shared expenses and settlements.")
+    st.caption("Positive means others owe that roommate; negative means they owe others. Settlements reduce both sides.")
+    settlement_message = st.session_state.pop("settlement_message", None)
+    if settlement_message:
+        st.success(settlement_message)
 
     try:
         with st.spinner("Loading data…"):
             from app.services.ledger import get_all_receipts, get_receipt_items, get_settlements  # type: ignore
 
             df_receipts = get_all_receipts()
+            df_all_items = get_receipt_items()
             df_settlements = get_settlements()
     except Exception as exc:
         st.error(f"Failed to load data: {exc}")
         df_receipts = pd.DataFrame(columns=["Receipt_ID", "Date", "Store", "Paid_By"])
+        df_all_items = pd.DataFrame(columns=["Receipt_ID", "Line_Total", "Beneficiary"])
         df_settlements = pd.DataFrame(columns=["Settlement_ID", "Date", "From_Roommate", "To_Roommate", "Amount", "Method"])
 
     if not df_receipts.empty and "Receipt_ID" in df_receipts.columns:
-        # Build balance dictionary per roommate
-        balances = {rm: 0.0 for rm in _DEFAULT_ROOMMATES}
-
-        for rid in df_receipts["Receipt_ID"].dropna().unique():
-            try:
-                items_df = get_receipt_items(str(rid))
-                if items_df.empty:
-                    continue
-                # Get payer from Receipts sheet
-                payer_row = df_receipts[df_receipts["Receipt_ID"] == rid]
-                payer = str(payer_row["Paid_By"].iloc[0]) if len(payer_row) > 0 else selected_user
-
-                for _, item in items_df.iterrows():
-                    line_total = float(item.get("Line_Total", 0))
-                    split_type = str(item.get("Split_Type", "Shared"))
-                    beneficiary_str = str(item.get("Beneficiary", "ALL"))
-
-                    # Payer gets out-of-pocket credit
-                    if payer in balances and line_total > 0:
-                        balances[payer] += line_total
-
-                    if split_type == "Shared":
-                        # Determine how many beneficiaries
-                        if beneficiary_str == "ALL":
-                            n_beneficiaries = 3
-                        elif len(beneficiary_str) == 2:
-                            n_beneficiaries = 2
-                        else:
-                            n_beneficiaries = 1
-
-                        share_per_beneficiary = line_total / n_beneficiaries
-                        # Deduct each beneficiary's share
-                        for rm in _DEFAULT_ROOMMATES:
-                            initial = _get_roommate_label(rm)
-                            if initial in beneficiary_str:
-                                if rm != payer:
-                                    balances[rm] -= share_per_beneficiary
-
-                    elif split_type == "Private":
-                        # Only the specific beneficiary is charged (not the payer's share)
-                        for rm in _DEFAULT_ROOMMATES:
-                            initial = _get_roommate_label(rm)
-                            if initial in beneficiary_str and rm != payer:
-                                balances[rm] -= line_total
-
-            except Exception as exc:
-                logger = __import__("logging").getLogger(__name__)
-                logger.warning("Error processing receipt %s: %s", rid, exc)
-                continue
-
-        # Apply settlements
-        if not df_settlements.empty and "From_Roommate" in df_settlements.columns and "Amount" in df_settlements.columns:
-            for _, row in df_settlements.iterrows():
-                frm = str(row.get("From_Roommate", ""))
-                to = str(row.get("To_Roommate", ""))
-                amt = float(row.get("Amount", 0))
-
-                # Find matching roommate labels
-                if amt > 0:
-                    for rm in _DEFAULT_ROOMMATES:
-                        if rm.startswith(frm) or (rm[-1] == frm[-1]):
-                            balances[rm] -= amt
-                            break
-                    for rm in _DEFAULT_ROOMMATES:
-                        if rm.startswith(to) or (rm[-1] == to[-1]):
-                            balances[rm] += amt
-                            break
+        balances_cents = _calculate_balance_cents(
+            df_receipts, df_all_items, df_settlements, selected_user
+        )
+        balances = {
+            roommate: balances_cents[_ROOMMATE_INITIALS[roommate]] / 100
+            for roommate in _DEFAULT_ROOMMATES
+        }
+        unallocated_cents = sum(balances_cents.values())
+        if unallocated_cents:
+            st.warning(
+                "Balances do not net to zero because at least one receipt's recorded total "
+                "differs from its allocated item total. Review the totals in Past Receipts. "
+                f"Unallocated difference: CHF {abs(unallocated_cents) / 100:,.2f}."
+            )
 
         # Display balance metrics
         st.subheader("Current Balances")
@@ -743,18 +932,34 @@ elif selected_tab == "Balances & Settlements":
         # Who-owes-whom matrix
         st.subheader("Who Owes Whom")
         owes_rows = []
-        for rm_from in _DEFAULT_ROOMMATES:
-            for rm_to in _DEFAULT_ROOMMATES:
-                if rm_from != rm_to:
-                    diff = -(balances[rm_from] + balances[rm_to])
-                    # If from is negative (owes), and to is positive (is owed)
-                    if balances[rm_from] < -0.01 and balances[rm_to] > 0.01:
-                        net = min(abs(balances[rm_from]), balances[rm_to])
-                        owes_rows.append({
-                            "From": rm_from,
-                            "To": rm_to,
-                            "Amount": round(net, 2),
-                        })
+        debtors = [
+            [name, -balances_cents[_ROOMMATE_INITIALS[name]]]
+            for name in _DEFAULT_ROOMMATES
+            if balances_cents[_ROOMMATE_INITIALS[name]] < 0
+        ]
+        creditors = [
+            [name, balances_cents[_ROOMMATE_INITIALS[name]]]
+            for name in _DEFAULT_ROOMMATES
+            if balances_cents[_ROOMMATE_INITIALS[name]] > 0
+        ]
+        debtor_index = creditor_index = 0
+        while debtor_index < len(debtors) and creditor_index < len(creditors):
+            amount_cents = min(
+                debtors[debtor_index][1], creditors[creditor_index][1]
+            )
+            owes_rows.append(
+                {
+                    "From": debtors[debtor_index][0],
+                    "To": creditors[creditor_index][0],
+                    "Amount (CHF)": amount_cents / 100,
+                }
+            )
+            debtors[debtor_index][1] -= amount_cents
+            creditors[creditor_index][1] -= amount_cents
+            if debtors[debtor_index][1] == 0:
+                debtor_index += 1
+            if creditors[creditor_index][1] == 0:
+                creditor_index += 1
 
         if owes_rows:
             df_owes = pd.DataFrame(owes_rows)
@@ -764,24 +969,29 @@ elif selected_tab == "Balances & Settlements":
 
         # Settlement form
         st.subheader("Log Settlement")
+        st.caption("From is the roommate paying; To is the roommate receiving the payment.")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            frm_rm = st.selectbox("From", _DEFAULT_ROOMMATES, key="settlement_from")
+            frm_rm = st.selectbox("From (pays)", _DEFAULT_ROOMMATES, key="settlement_from")
         with c2:
-            to_rm = st.selectbox("To", _DEFAULT_ROOMMATES, key="settlement_to")
+            to_rm = st.selectbox("To (receives)", _DEFAULT_ROOMMATES, key="settlement_to")
         with c3:
-            amt = st.number_input("Amount ($)", min_value=0.0, step=0.01, format="%.2f", key="settlement_amount")
+            amt = st.number_input("Amount (CHF)", min_value=0.0, step=0.01, format="%.2f", key="settlement_amount")
         with c4:
             method = st.selectbox("Method", ["Bank Transfer", "Twint", "Cash"], key="settlement_method")
 
         if st.button("Log Settlement", type="primary", key="log_settlement_btn"):
-            try:
-                with st.spinner("Logging settlement…"):
-                    from app.services.ledger import append_settlement  # type: ignore
-                    sid = append_settlement(frm_rm, to_rm, amt, method)
-                st.toast(f"Settlement **{sid}** logged.", icon="✅")
-            except Exception as exc:
-                st.error(f"Error logging settlement: {str(exc)}")
+            if frm_rm == to_rm:
+                st.error("Choose two different roommates for a settlement.")
+            else:
+                try:
+                    with st.spinner("Logging settlement…"):
+                        from app.services.ledger import append_settlement  # type: ignore
+                        sid = append_settlement(frm_rm, to_rm, amt, method)
+                    st.session_state["settlement_message"] = f"Settlement {sid} logged."
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Error logging settlement: {str(exc)}")
 
     else:
         st.info("No receipts found. Upload a receipt to start tracking balances.")
