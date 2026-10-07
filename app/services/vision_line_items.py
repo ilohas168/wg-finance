@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Sequence, Literal
 
 import groq
@@ -151,6 +152,112 @@ def _strip_markdown_json(raw: str) -> str:
     return stripped
 
 
+def _request_focused_names(
+    model_name: str,
+    image_content: list[dict[str, Any]],
+) -> Optional[list[Any]]:
+    """Read product labels independently while the full receipt is parsed."""
+    response = _get_client().chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a receipt OCR transcriber. Copy visible text exactly; "
+                    "never autocorrect or infer product names. Return valid JSON only."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Transcribe only the item descriptions in the leftmost Artikel column, "
+                            "top to bottom. Preserve the printed spelling, capitalization, "
+                            "abbreviations, and truncation, even when a name looks misspelled. "
+                            "Do not translate, expand, or guess unreadable characters; use ? only "
+                            "for an unreadable character. Return one string per physical receipt "
+                            "row in a JSON object shaped as {\"names\":[\"...\"]}. These images "
+                            "are overlapping views of one receipt: deduplicate rows visible in "
+                            "overlaps. Include discounts as printed rows."
+                        ),
+                    },
+                    *image_content,
+                ],
+            },
+        ],
+        response_format={"type": "json_object"},
+        max_tokens=2048,
+    )
+    content = response.choices[0].message.content
+    if not content:
+        return None
+    data = json.loads(_strip_markdown_json(content))
+    names = data.get("names") if isinstance(data, dict) else None
+    return names if isinstance(names, list) else None
+
+
+def _request_focused_prices(
+    model_name: str,
+    image_content: list[dict[str, Any]],
+    receipt: ItemizedReceipt,
+    item_total: float,
+) -> Optional[list[float]]:
+    """Re-read the printed Total column without adjusting values to balance."""
+    response = _get_client().chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are transcribing receipt line totals. Read the printed columns "
+                    "carefully and return valid JSON only. Never calculate a balancing amount."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Read only the far-right Total column for exactly {len(receipt.items)} "
+                            "item rows, in top-to-bottom order. Return a JSON object with exactly "
+                            f"{len(receipt.items)} numeric values in a `prices` array. Each value "
+                            "must be copied from that row's rightmost Total cell. Ignore Menge, "
+                            "Preis, and Aktion; do not multiply, subtract, infer, or shift values "
+                            "between rows. A separate trailing-minus discount is negative. "
+                            f"The earlier row sum was CHF {item_total:.2f}; the printed footer "
+                            f"is CHF {receipt.total_amount:.2f}. Do not adjust any value just "
+                            "to make the sum match; copy the printed cells even if they do not add up."
+                        ),
+                    },
+                    *image_content,
+                ],
+            },
+        ],
+        response_format={"type": "json_object"},
+        max_tokens=2048,
+    )
+    content = response.choices[0].message.content
+    if not content:
+        return None
+    data = json.loads(_strip_markdown_json(content))
+    prices = data.get("prices") if isinstance(data, dict) else None
+    if not (
+        isinstance(prices, list)
+        and len(prices) == len(receipt.items)
+        and all(
+            isinstance(price, (int, float))
+            and not isinstance(price, bool)
+            and math.isfinite(price)
+            for price in prices
+        )
+    ):
+        raise ValueError("Focused line-total check returned an invalid price list.")
+    return [float(price) for price in prices]
+
+
 # --------------------------------------------------------------------------- #
 # Image compression                                                            #
 # --------------------------------------------------------------------------- #
@@ -237,235 +344,174 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
     candidates = list(_VISION_MODEL_CANDIDATES)
     last_exc: Optional[Exception] = None
 
+    # Image preparation is independent of the selected model. Do it once so
+    # model fallbacks do not repeat the same crop, JPEG, and base64 work.
+    prepared_images = _prepare_images(image_bytes)
+    image_content = [
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{mime_type};base64,{base64.b64encode(image).decode('utf-8')}"
+            },
+        }
+        for image, mime_type in prepared_images
+    ]
+
     for model_name in candidates:
         logger.info("vision_line_items: trying model '%s'", model_name)
         client = _get_client()
+        # Name OCR is independent of numeric extraction. Start it alongside
+        # the full parse, then retain it only when its row count matches.
+        checks = ThreadPoolExecutor(max_workers=2)
+        names_future = checks.submit(_request_focused_names, model_name, image_content)
 
-        # Preserve dimensions and text detail; use JPEG to keep payloads compact.
-        prepared_images = _prepare_images(image_bytes)
-        image_content = [
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{mime_type};base64,{base64.b64encode(image).decode('utf-8')}"
-                },
-            }
-            for image, mime_type in prepared_images
-        ]
-
-        for attempt in range(1, 4):
-            try:
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "Parse this receipt. Return structured JSON."},
-                                *image_content,
-                            ],
-                        },
-                    ],
-                    response_format={"type": "json_object"},
-                    max_tokens=4096,
-                )
-
-                content = response.choices[0].message.content
-                if content is None:
-                    raise ValueError("Groq returned no content for the receipt image.")
-
-                # Clean and parse.
-                cleaned = _strip_markdown_json(content)
-                receipt = ItemizedReceipt.model_validate_json(cleaned)
-
-                # Isolate product-name OCR from numeric extraction. When the
-                # model handles names, weights, and columns together it can
-                # normalize unfamiliar labels or shift text between rows.
+        try:
+            for attempt in range(1, 4):
                 try:
-                    names_response = client.chat.completions.create(
+                    response = client.chat.completions.create(
                         model=model_name,
                         messages=[
-                            {
-                                "role": "system",
-                                "content": (
-                                    "You are a receipt OCR transcriber. Copy visible text exactly; "
-                                    "never autocorrect or infer product names. Return valid JSON only."
-                                ),
-                            },
+                            {"role": "system", "content": _SYSTEM_PROMPT},
                             {
                                 "role": "user",
                                 "content": [
-                                    {
-                                        "type": "text",
-                                        "text": (
-                                            "Transcribe only the item descriptions in the leftmost Artikel column, "
-                                            "top to bottom. Preserve the printed spelling, capitalization, "
-                                            "abbreviations, and truncation, even when a name looks misspelled. "
-                                            "Do not translate, expand, or guess unreadable characters; use ? only "
-                                            f"for an unreadable character. Return exactly {len(receipt.items)} "
-                                            "strings in a JSON object shaped as {\"names\":[\"...\"]}. "
-                                            "These images are overlapping views of one receipt: deduplicate rows "
-                                            "visible in overlaps. Include discounts as printed rows."
-                                        ),
-                                    },
+                                    {"type": "text", "text": "Parse this receipt. Return structured JSON."},
                                     *image_content,
                                 ],
                             },
                         ],
                         response_format={"type": "json_object"},
-                        max_tokens=2048,
-                    )
-                    names_content = names_response.choices[0].message.content
-                    if names_content:
-                        names_data = json.loads(_strip_markdown_json(names_content))
-                        names = names_data.get("names") if isinstance(names_data, dict) else None
-                        if (
-                            isinstance(names, list)
-                            and len(names) == len(receipt.items)
-                            and all(isinstance(name, str) and name.strip() for name in names)
-                        ):
-                            for item, name in zip(receipt.items, names):
-                                item.name = name.strip()
-                        else:
-                            logger.warning(
-                                "vision_line_items: focused name OCR returned %s names for %d items; keeping original names",
-                                len(names) if isinstance(names, list) else "invalid",
-                                len(receipt.items),
-                            )
-                except Exception:
-                    logger.exception(
-                        "vision_line_items: focused name OCR failed; keeping names from full parse"
+                        max_tokens=4096,
                     )
 
-                # If extracted rows do not reconcile to the printed footer,
-                # re-read only the far-right Total column. This isolates line
-                # totals from unit prices and quantities. Keep a correction
-                # only when it improves the match; never force-balance rows.
-                item_total = round(
-                    sum(item.price for item in receipt.items) - receipt.header_discounts,
-                    2,
-                )
-                initial_gap = round(receipt.total_amount - item_total, 2)
-                if abs(initial_gap) > 0.05:
-                    logger.warning(
-                        "vision_line_items: item rows total %.2f differs from footer %.2f by %.2f; rechecking receipt rows",
-                        item_total,
-                        receipt.total_amount,
-                        initial_gap,
+                    content = response.choices[0].message.content
+                    if content is None:
+                        raise ValueError("Groq returned no content for the receipt image.")
+                    receipt = ItemizedReceipt.model_validate_json(_strip_markdown_json(content))
+
+                    # On a total mismatch, start the focused price check while
+                    # name OCR is already in flight. Both checks use the same
+                    # original high-detail crops and remain independently validated.
+                    item_total = round(
+                        sum(item.price for item in receipt.items) - receipt.header_discounts,
+                        2,
                     )
-                    try:
-                        correction_response = client.chat.completions.create(
-                            model=model_name,
-                            messages=[
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        "You are transcribing receipt line totals. Read the printed columns "
-                                        "carefully and return valid JSON only. Never calculate a balancing amount."
-                                    ),
-                                },
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {
-                                            "type": "text",
-                                            "text": (
-                                                f"Read only the far-right Total column for exactly {len(receipt.items)} "
-                                                "item rows, in top-to-bottom order. Return a JSON object with exactly "
-                                                f"{len(receipt.items)} numeric values in a `prices` array. Each value "
-                                                "must be copied from that row's rightmost Total cell. Ignore Menge, "
-                                                "Preis, and Aktion; do not multiply, subtract, infer, or shift values "
-                                                "between rows. A separate trailing-minus discount is negative. "
-                                                f"The earlier row sum was CHF {item_total:.2f}; the printed footer "
-                                                f"is CHF {receipt.total_amount:.2f}. Do not adjust any value just "
-                                                "to make the sum match; copy the printed cells even if they do not add up."
-                                            ),
-                                        },
-                                        *image_content,
-                                    ],
-                                },
-                            ],
-                            response_format={"type": "json_object"},
-                            max_tokens=2048,
+                    initial_gap = round(receipt.total_amount - item_total, 2)
+                    correction_future = None
+                    if abs(initial_gap) > 0.05:
+                        logger.warning(
+                            "vision_line_items: item rows total %.2f differs from footer %.2f by %.2f; rechecking receipt rows",
+                            item_total,
+                            receipt.total_amount,
+                            initial_gap,
                         )
-                        correction_content = correction_response.choices[0].message.content
-                        if correction_content:
-                            price_data = json.loads(_strip_markdown_json(correction_content))
-                            prices = price_data.get("prices") if isinstance(price_data, dict) else None
-                            if not (
-                                isinstance(prices, list)
-                                and len(prices) == len(receipt.items)
-                                and all(
-                                    isinstance(price, (int, float))
-                                    and not isinstance(price, bool)
-                                    and math.isfinite(price)
-                                    for price in prices
-                                )
+                        correction_future = checks.submit(
+                            _request_focused_prices,
+                            model_name,
+                            image_content,
+                            receipt,
+                            item_total,
+                        )
+                    try:
+                        names = names_future.result()
+                        if names is not None:
+                            if (
+                                len(names) == len(receipt.items)
+                                and all(isinstance(name, str) and name.strip() for name in names)
                             ):
-                                raise ValueError("Focused line-total check returned an invalid price list.")
-
-                            corrected_total = round(sum(prices) - receipt.header_discounts, 2)
-                            corrected_gap = round(
-                                receipt.total_amount - corrected_total,
-                                2,
-                            )
-                            if abs(corrected_gap) < abs(initial_gap):
-                                receipt.items = [
-                                    item.model_copy(update={"price": float(price)})
-                                    for item, price in zip(receipt.items, prices)
-                                ]
-                                logger.info(
-                                    "vision_line_items: focused total check improved gap from %.2f to %.2f",
-                                    initial_gap,
-                                    corrected_gap,
-                                )
+                                for item, name in zip(receipt.items, names):
+                                    item.name = name.strip()
                             else:
                                 logger.warning(
-                                    "vision_line_items: focused total check did not improve the total gap"
+                                    "vision_line_items: focused name OCR returned %s names for %d items; keeping original names",
+                                    len(names),
+                                    len(receipt.items),
                                 )
                     except Exception:
                         logger.exception(
-                            "vision_line_items: focused total check failed; keeping first parse"
+                            "vision_line_items: focused name OCR failed; keeping names from full parse"
                         )
 
-                logger.info(
-                    "vision_line_items parsed with '%s': merchant=%s items=%d total=%.2f",
-                    model_name, receipt.merchant, len(receipt.items), receipt.total_amount,
-                )
-                return receipt
+                    if correction_future is not None:
+                        try:
+                            prices = correction_future.result()
+                            if prices is not None:
+                                corrected_total = round(sum(prices) - receipt.header_discounts, 2)
+                                corrected_gap = round(receipt.total_amount - corrected_total, 2)
+                                if abs(corrected_gap) < abs(initial_gap):
+                                    receipt.items = [
+                                        item.model_copy(update={"price": price})
+                                        for item, price in zip(receipt.items, prices)
+                                    ]
+                                    logger.info(
+                                        "vision_line_items: focused total check improved gap from %.2f to %.2f",
+                                        initial_gap,
+                                        corrected_gap,
+                                    )
+                                else:
+                                    logger.warning(
+                                        "vision_line_items: focused total check did not improve the total gap"
+                                    )
+                        except Exception:
+                            logger.exception(
+                                "vision_line_items: focused total check failed; keeping first parse"
+                            )
 
-            except NotFoundError as exc:
-                logger.warning("vision_line_items: model '%s' not found (404) — trying next candidate", model_name)
-                last_exc = exc
-                break  # abandon this model, move to next candidate
+                    logger.info(
+                        "vision_line_items parsed with '%s': merchant=%s items=%d total=%.2f",
+                        model_name,
+                        receipt.merchant,
+                        len(receipt.items),
+                        receipt.total_amount,
+                    )
+                    return receipt
 
-            except Exception as exc:
-                last_exc = exc
-                status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
-                error_msg = str(exc).lower()
-                if status_code == 413 or "request_too_large" in error_msg or "request entity too large" in error_msg:
+                except NotFoundError as exc:
                     logger.warning(
-                        "vision_line_items: image request too large for '%s' — trying next model",
+                        "vision_line_items: model '%s' not found (404) — trying next candidate",
                         model_name,
                     )
+                    last_exc = exc
                     break
-                is_transient = (
-                    status_code in (429, 503)
-                    or "rate limit" in error_msg
-                    or "unavailable" in error_msg
-                    or "overloaded" in error_msg
-                )
-                if is_transient and attempt < 3:
-                    delay = 2 * (2 ** (attempt - 1))
-                    logger.warning("vision_line_items: transient error on '%s' (attempt %d/3) — retrying in %.0fs", model_name, attempt, delay)
-                    import time
-                    time.sleep(delay)
-                elif getattr(exc, "status_code", None) == 404 or "model_not_found" in str(exc).lower():
-                    logger.warning("vision_line_items: model '%s' failed (not found?) — trying next candidate", model_name)
-                    break
-                else:
-                    raise
+
+                except Exception as exc:
+                    last_exc = exc
+                    status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+                    error_msg = str(exc).lower()
+                    if status_code == 413 or "request_too_large" in error_msg or "request entity too large" in error_msg:
+                        logger.warning(
+                            "vision_line_items: image request too large for '%s' — trying next model",
+                            model_name,
+                        )
+                        break
+                    is_transient = (
+                        status_code in (429, 503)
+                        or "rate limit" in error_msg
+                        or "unavailable" in error_msg
+                        or "overloaded" in error_msg
+                    )
+                    if is_transient and attempt < 3:
+                        delay = 2 * (2 ** (attempt - 1))
+                        logger.warning(
+                            "vision_line_items: transient error on '%s' (attempt %d/3) — retrying in %.0fs",
+                            model_name,
+                            attempt,
+                            delay,
+                        )
+                        import time
+                        time.sleep(delay)
+                    elif getattr(exc, "status_code", None) == 404 or "model_not_found" in str(exc).lower():
+                        logger.warning(
+                            "vision_line_items: model '%s' failed (not found?) — trying next candidate",
+                            model_name,
+                        )
+                        break
+                    else:
+                        raise
+        finally:
+            # On success both futures have completed. If the model fails, avoid
+            # holding up fallback attempts for an obsolete OCR request.
+            checks.shutdown(wait=False, cancel_futures=True)
 
     logger.exception(
         "vision_line_items: all candidates exhausted (image=%d bytes)",
