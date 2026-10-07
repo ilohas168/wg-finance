@@ -8,9 +8,12 @@ Handles the three core operations:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -52,6 +55,31 @@ def _unescape_private_key(info: dict) -> dict:
     return info
 
 
+def _get_streamlit_secret(name: str) -> Any:
+    """Return one Streamlit secret, or ``None`` when secrets are unavailable.
+
+    ``st.secrets`` can raise when a local Streamlit installation has no
+    secrets.toml configured, so reading it must remain optional for the bot.
+    """
+    try:
+        import streamlit as st  # type: ignore[import-not-found]
+        return st.secrets.get(name)
+    except Exception as exc:
+        # An absent secrets.toml is normal for the FastAPI bot. A parse error
+        # is not: make that visible without ever logging secret values.
+        if not (
+            type(exc).__name__ == "StreamlitSecretNotFoundError"
+            and getattr(exc, "error_id", None) == "no-secrets-found"
+        ):
+            logger.warning(
+                "Could not read Streamlit secret %s (%s): %s",
+                name,
+                type(exc).__name__,
+                exc,
+            )
+        return None
+
+
 # ------------------------------------------------------------------ #
 # Google Sheets client factory                                         #
 # ------------------------------------------------------------------ #
@@ -62,11 +90,13 @@ def _get_gspread_client() -> GSpreadClient:
     Credential sources are checked in priority order:
 
     a. ``st.secrets["gcp_service_account"]``  -- TOML dict section (Streamlit)
-    b. ``st.secrets["GOOGLE_CREDENTIALS_JSON"]`` or ``GOOGLE_CREDENTIALS_JSON`` env var
+    b. ``GOOGLE_CREDENTIALS_JSON_B64`` -- base64-encoded service-account JSON
+    c. ``st.secrets["GOOGLE_CREDENTIALS_JSON"]`` or ``GOOGLE_CREDENTIALS_JSON`` env var
        -- raw JSON string
-    c. ``st.secrets["GOOGLE_CREDENTIALS_FILE"]`` or ``GOOGLE_CREDENTIALS_FILE`` env var
+    d. ``st.secrets["GOOGLE_CREDENTIALS_FILE"]`` or ``GOOGLE_CREDENTIALS_FILE`` env var
        -- file path to a service-account key
-    d. Local file fallback (``wg-finance-bot-6112de07abed.json``, ``credentials.json``)
+    e. Local file fallback (project credential files or
+       ``~/.wg-finance/credentials.json``)
     """
 
     # ---- helper to try and authorise from a parsed info dict ---------- #
@@ -81,31 +111,45 @@ def _get_gspread_client() -> GSpreadClient:
             return None
 
     # ---- a. Streamlit TOML dict ("gcp_service_account") --------------- #
-    try:
-        import streamlit as st  # type: ignore[import-not-found]
-        secret = getattr(st, "secrets", {}).get("gcp_service_account")
-        if isinstance(secret, dict):
-            client = _authorise(_unescape_private_key(dict(secret)), "st.secrets['gcp_service_account']")
-            if client:
-                return client
-    except ImportError:
-        pass  # not in Streamlit context
+    secret = _get_streamlit_secret("gcp_service_account")
+    if isinstance(secret, Mapping):
+        client = _authorise(_unescape_private_key(dict(secret)), "st.secrets['gcp_service_account']")
+        if client:
+            return client
 
-    # ---- b. GOOGLE_CREDENTIALS_JSON (raw JSON string) ---------------- #
+    # ---- b. Base64 JSON secret: avoids TOML interpreting JSON escapes --- #
+    b64_sources = [
+        os.environ.get("GOOGLE_CREDENTIALS_JSON_B64"),
+        _get_streamlit_secret("GOOGLE_CREDENTIALS_JSON_B64"),
+    ]
+    for encoded in b64_sources:
+        if not isinstance(encoded, str) or not encoded.strip():
+            continue
+        try:
+            compact = "".join(encoded.split())
+            raw_json = base64.b64decode(compact, validate=True).decode("utf-8")
+            info = json.loads(raw_json)
+            if not isinstance(info, dict):
+                raise ValueError("decoded credentials must be a JSON object")
+        except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            logger.warning(
+                "Could not decode GOOGLE_CREDENTIALS_JSON_B64 (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+            continue
+        client = _authorise(_unescape_private_key(info), "GOOGLE_CREDENTIALS_JSON_B64")
+        if client:
+            return client
+
+    # ---- c. GOOGLE_CREDENTIALS_JSON (raw JSON string) ---------------- #
     json_sources = [
         os.environ.get("GOOGLE_CREDENTIALS_JSON"),
+        _get_streamlit_secret("GOOGLE_CREDENTIALS_JSON"),
     ]
-    # Also check Streamlit secrets key "GOOGLE_CREDENTIALS_JSON".
-    try:
-        import streamlit as st  # type: ignore[import-not-found]
-        st_val = getattr(st, "secrets", {}).get("GOOGLE_CREDENTIALS_JSON")
-        if isinstance(st_val, str):
-            json_sources.append(st_val)
-    except (ImportError, AttributeError):
-        pass
 
     for raw in json_sources:
-        if not raw or not raw.strip().startswith("{"):
+        if not isinstance(raw, str) or not raw.strip().startswith("{"):
             continue
         try:
             info = json.loads(raw, strict=False)
@@ -114,10 +158,10 @@ def _get_gspread_client() -> GSpreadClient:
             # TOML triple-quoted secrets), provide a helpful message.
             if "\n" in raw or "\r" in raw:
                 logger.warning(
-                    "GOOGLE_CREDENTIALS_JSON contains literal newline characters. "
-                    "Please paste the service-account JSON as a **single line** in "
-                    "Streamlit Cloud Settings → Secrets.\n"
-                    "Error: %s", e,
+                    "Could not parse GOOGLE_CREDENTIALS_JSON with literal newlines. "
+                    "In Streamlit Cloud, use a [gcp_service_account] secrets table "
+                    "instead of storing the whole JSON document as one string. Error: %s",
+                    e,
                 )
             else:
                 logger.exception(
@@ -129,17 +173,11 @@ def _get_gspread_client() -> GSpreadClient:
         if client:
             return client
 
-    # ---- c. GOOGLE_CREDENTIALS_FILE (file path) --------------------- #
+    # ---- d. GOOGLE_CREDENTIALS_FILE (file path) --------------------- #
     file_sources = [
         os.environ.get("GOOGLE_CREDENTIALS_FILE"),
+        _get_streamlit_secret("GOOGLE_CREDENTIALS_FILE"),
     ]
-    try:
-        import streamlit as st  # type: ignore[import-not-found]
-        st_val = getattr(st, "secrets", {}).get("GOOGLE_CREDENTIALS_FILE")
-        if isinstance(st_val, str):
-            file_sources.append(st_val)
-    except (ImportError, AttributeError):
-        pass
 
     for path in file_sources:
         if not path:
@@ -153,20 +191,26 @@ def _get_gspread_client() -> GSpreadClient:
             except Exception:
                 logger.exception("Failed to load service-account file: %s", expanded)
 
-    # ---- d. Local file fallback -------------------------------------- #
-    for local_name in ("wg-finance-bot-6112de07abed.json", "credentials.json"):
-        local_path = os.path.expanduser(os.path.join(os.path.dirname(__file__), "..", "..", local_name))
+    # ---- e. Local file fallback -------------------------------------- #
+    local_paths = [
+        os.path.join(os.path.dirname(__file__), "..", "..", "wg-finance-bot-6112de07abed.json"),
+        os.path.join(os.path.dirname(__file__), "..", "..", "credentials.json"),
+        "~/.wg-finance/credentials.json",
+    ]
+    for local_path in local_paths:
+        local_path = os.path.expanduser(local_path)
         if os.path.isfile(local_path):
             try:
                 creds = Credentials.from_service_account_file(local_path, scopes=_SCOPES)
-                logger.info("Successfully loaded credentials from local file: %s", local_name)
+                logger.info("Successfully loaded credentials from local file: %s", local_path)
                 return gspread.authorize(creds)
             except Exception:
-                logger.exception("Failed to load local credential file: %s", local_name)
+                logger.exception("Failed to load local credential file: %s", local_path)
 
     raise RuntimeError(
         "No service-account credentials found. Set one of:\n"
         "  st.secrets[\"gcp_service_account\"] (dict),\n"
+        "  GOOGLE_CREDENTIALS_JSON_B64 (base64-encoded JSON),\n"
         "  GOOGLE_CREDENTIALS_JSON (JSON string),\n"
         "  GOOGLE_CREDENTIALS_FILE or st.secrets[\"GOOGLE_CREDENTIALS_FILE\"] (file path).\n"
         "See app/services/ledger.py docstring for details."
@@ -213,13 +257,9 @@ def _get_sheet_id() -> str:
       2. ``GOOGLE_SHEET_ID`` environment variable
       3. Hard-coded known-good default
     """
-    try:
-        import streamlit as st  # type: ignore[import-not-found]
-        val = getattr(st, "secrets", {}).get("GOOGLE_SHEET_ID")
-        if val:
-            return str(val)
-    except (ImportError, AttributeError):
-        pass
+    val = _get_streamlit_secret("GOOGLE_SHEET_ID")
+    if val:
+        return str(val)
 
     val = os.environ.get("GOOGLE_SHEET_ID", "")
     if val:

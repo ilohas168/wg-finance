@@ -8,28 +8,36 @@ This module provides a real-time, browser-based dashboard that displays:
 ## How to run locally
     streamlit run app/dashboard.py --server.port 8501
 
-Requires the same environment variables as the webhook service:
-    GOOGLE_SHEET_ID, GOOGLE_CREDENTIALS_JSON  (or GOOGLE_CREDENTIALS_FILE)
+Requires ``GOOGLE_SHEET_ID`` and one of ``GOOGLE_CREDENTIALS_JSON_B64``,
+the Streamlit ``gcp_service_account`` secrets table, ``GOOGLE_CREDENTIALS_JSON``,
+or ``GOOGLE_CREDENTIALS_FILE``.
 
 ## Free deployment to Streamlit Community Cloud
 1. Push this repo to GitHub (public or invite collaborators).
 2. Go to https://streamlit.io/cloud and sign in with GitHub.
 3. Click "New App", select this repo + branch, set the entry point to
    ``app/dashboard.py`` and keep the rest as defaults.
-4. Under **Settings > Secrets**, add:
-     - ``GOOGLE_SHEET_ID`` — your Google Sheet ID
-     - ``GOOGLE_CREDENTIALS_FILE`` — (if using a file) or store the JSON
-       in your OS-level env via Streamlit's secret manager.
-   For simpler setup, place your service-account JSON as
-   ``app/credentials.json`` and commit it to a private repo; the
-   dashboard looks for that path automatically.
+4. Under **Settings > Secrets**, add your sheet ID and a base64-encoded
+   service-account JSON value:
+
+   ```toml
+   GOOGLE_SHEET_ID = "your-google-sheet-id"
+   GOOGLE_CREDENTIALS_JSON_B64 = "paste-the-one-line-base64-output-here"
+   ```
+
+   On macOS, generate that value locally with
+   ``base64 -i service-account.json | tr -d '\n'``. Paste the command's output
+   directly into Streamlit Secrets; never paste it into chat or commit it.
+   Base64 avoids TOML interpreting the JSON's private-key escapes. The
+   ``gcp_service_account`` table is also supported if you prefer it.
+   For local development, use ``GOOGLE_CREDENTIALS_FILE`` or
+   ``GOOGLE_CREDENTIALS_JSON``; keep credential files out of source control.
 5. Click **Deploy** — you'll get a free ``*.streamlit.app`` URL.
 
 """
 
 from __future__ import annotations
 
-import json
 import os
 from datetime import date, timedelta
 from typing import Dict, List, Optional
@@ -39,7 +47,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from google.oauth2.service_account import Credentials
+
+from app.services.ledger import _get_gspread_client, _get_streamlit_secret
 
 # --------------------------------------------------------------------------- #
 # Configuration                                                               #
@@ -50,24 +59,14 @@ _KNOWN_SHEET_ID = "18oTLJ8Fpe_XKBdSwV0lTKe2ptSaRLIRHj_9JF0jsBq0"
 
 def _get_sheet_id() -> str:
     """Resolve GOOGLE_SHEET_ID from Streamlit secrets, env, or known default."""
-    try:
-        import streamlit as st  # type: ignore[import-not-found]
-        val = getattr(st, "secrets", {}).get("GOOGLE_SHEET_ID")
-        if val:
-            return str(val)
-    except (ImportError, AttributeError):
-        pass
+    val = _get_streamlit_secret("GOOGLE_SHEET_ID")
+    if val:
+        return str(val)
     val = os.environ.get("GOOGLE_SHEET_ID", "")
     return str(val) if val else _KNOWN_SHEET_ID
 
 
 SHEET_ID = _get_sheet_id()
-
-_CREDENTIAL_PATHS = [
-    os.environ.get("GOOGLE_CREDENTIALS_FILE", ""),
-    os.path.join(os.path.dirname(__file__), "..", "credentials.json"),
-    os.path.expanduser("~/.wg-finance/credentials.json"),
-]
 
 # Roommate display names — keep in sync with the webhook's ROOMMATE_MAP.
 ROOMMATES = ["Shin", "Fabian", "Pierre"]
@@ -78,27 +77,8 @@ ROOMMATES = ["Shin", "Fabian", "Pierre"]
 # --------------------------------------------------------------------------- #
 
 def _authenticate() -> gspread.Client:
-    """Authenticate gspread client from env or file."""
-    cred_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
-    if SHEET_ID and cred_json:
-        creds = Credentials.from_service_account_info(
-            json.loads(cred_json),
-            scopes=["https://www.googleapis.com/auth/spreadsheets"],
-        )
-        return gspread.Client(creds=creds)
-
-    for path in _CREDENTIAL_PATHS:
-        if path and os.path.isfile(path):
-            creds = Credentials.from_service_account_file(
-                path, scopes=["https://www.googleapis.com/auth/spreadsheets"],
-            )
-            return gspread.Client(creds=creds)
-
-    raise RuntimeError(
-        "Cannot authenticate: set GOOGLE_CREDENTIALS_JSON (service account JSON) "
-        "or GOOGLE_CREDENTIALS_FILE / credentials.json pointing to a "
-        "Google service-account key. See app/dashboard.py docstring."
-    )
+    """Authenticate using the shared ledger credential-source resolver."""
+    return _get_gspread_client()
 
 
 def fetch_transactions() -> List[Dict[str, str | float]]:

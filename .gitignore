@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .env
+.streamlit/secrets.toml
 credentials.json
 wg-finance-bot-6112de07abed.json
 *.json
