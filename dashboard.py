@@ -6,11 +6,12 @@ Pages:
   2. **Past Receipts** — browse historical receipts, see roommate shares, edit or delete.
   3. **Balances & Settlements** — per-roommate balances, who-owes-whom matrix,
      settlement tracking.
-  4. **Parent Reports** — filtered expense history with total-spent metric and CSV export.
+  4. **Total Spendings** — monthly and all-time spending by roommate.
 """
 
 from __future__ import annotations
 
+import calendar
 import io
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -22,6 +23,7 @@ from app.services.accounting import (
     recover_legacy_weighted_quantities,
     round_shares_to_cents,
 )
+from app.services.reporting import filter_receipts_for_period
 
 # --------------------------------------------------------------------------- #
 # Page config                                                                  #
@@ -154,13 +156,6 @@ with st.sidebar:
                             st.error(msg)
 
     st.divider()
-    today = date.today()
-    default_start = today.replace(day=1) if today.day > 1 else today - __import__("datetime").timedelta(days=today.day - 1)
-    date_range = st.date_input(
-        "Date Range",
-        value=(default_start, today),
-        key="date_range_picker",
-    )
     selected_user = st.radio(
         "Viewing as",
         options=_DEFAULT_ROOMMATES,
@@ -177,10 +172,12 @@ with st.sidebar:
     # Dynamic tab list — Tab 1 only visible when logged in.
     if st.session_state.get("current_tab") == "Edit History":
         st.session_state["current_tab"] = "Past Receipts"
+    if st.session_state.get("current_tab") == "Parent Reports":
+        st.session_state["current_tab"] = "Total Spendings"
     if logged_in:
-        tabs = ["Upload Receipt", "Past Receipts", "Balances & Settlements", "Parent Reports"]
+        tabs = ["Upload Receipt", "Past Receipts", "Balances & Settlements", "Total Spendings"]
     else:
-        tabs = ["View History", "Balances & Settlements", "Parent Reports"]
+        tabs = ["View History", "Balances & Settlements", "Total Spendings"]
 
     selected_tab = st.radio(
         "Page",
@@ -996,63 +993,164 @@ elif selected_tab == "Balances & Settlements":
 
 
 # =========================================================================== #
-# Tab 4 — Parent Reports                                                       #
+# Tab 4 — Total Spendings                                                     #
 # =========================================================================== #
 
-elif selected_tab == "Parent Reports":
-    st.title("Parent Reports")
-    st.caption("Browse expense history filtered by roommate and date range.")
+elif selected_tab == "Total Spendings":
+    st.title("Total Spendings")
+    st.caption(
+        "Compare what each roommate paid with their share of spending for a month or all time."
+    )
 
     try:
         with st.spinner("Loading data…"):
             from app.services.ledger import get_all_receipts, get_receipt_items  # type: ignore
 
             df_receipts = get_all_receipts()
+            df_all_items = get_receipt_items()
     except Exception as exc:
-        st.error(f"Failed to load receipts: {exc}")
+        st.error(f"Failed to load spending data: {exc}")
         df_receipts = pd.DataFrame(columns=["Receipt_ID", "Date", "Store"])
+        df_all_items = pd.DataFrame(columns=["Receipt_ID", "Line_Total", "Beneficiary"])
 
-    if not df_receipts.empty and "Date" in df_receipts.columns and "Paid_By" in df_receipts.columns:
-        # Filter by date range
-        start_date, end_date = date_range[0], date_range[1]
-        df_receipts["Date"] = pd.to_datetime(df_receipts["Date"], errors="coerce")
-        df_filtered = df_receipts[
-            (df_receipts["Date"] >= pd.Timestamp(start_date)) &
-            (df_receipts["Date"] <= pd.Timestamp(end_date))
-        ].copy()
+    if not df_receipts.empty and "Date" in df_receipts.columns:
+        receipt_dates = pd.to_datetime(df_receipts["Date"], errors="coerce")
+        available_years = sorted(
+            {int(year) for year in receipt_dates.dt.year.dropna().unique()},
+            reverse=True,
+        )
+        month_options = ["All-time"] + [
+            calendar.month_name[month] for month in range(1, 13)
+        ]
+        month_col, year_col = st.columns(2)
+        with month_col:
+            selected_month = st.selectbox(
+                "Month",
+                month_options,
+                key="total_spendings_month",
+            )
 
-        # Filter by selected roommate
-        if "Paid_By" in df_filtered.columns:
-            df_roommate = df_filtered[df_filtered["Paid_By"] == selected_user]
+        df_period = df_receipts.copy()
+        period_slug = "all-time"
+        if selected_month != "All-time":
+            years = sorted(
+                set(available_years) | {date.today().year},
+                reverse=True,
+            )
+            default_year = available_years[0] if available_years else date.today().year
+            with year_col:
+                selected_year = st.selectbox(
+                    "Year",
+                    years,
+                    index=years.index(default_year),
+                    key="total_spendings_year",
+                )
+            month_number = list(calendar.month_name).index(selected_month)
+            df_period = filter_receipts_for_period(
+                df_receipts,
+                month=month_number,
+                year=selected_year,
+            )
+            period_slug = f"{selected_month.lower()}-{selected_year}"
+            st.caption(f"Showing {selected_month} {selected_year} only.")
         else:
-            df_roommate = df_filtered
+            st.caption("Showing receipts from every year.")
 
-        # Show total metric
-        total_spent_cents = (
-            sum(_money_to_cents(value) for value in df_roommate["Grand_Total"])
-            if "Grand_Total" in df_roommate.columns
-            else 0
+        paid_cents_by_person = {code: 0 for code in "ABC"}
+        receipts_paid_by_person = {code: 0 for code in "ABC"}
+        exact_allocated_cents = {code: Decimal(0) for code in "ABC"}
+        allocated_total_cents = 0
+        detail_rows = []
+
+        for _, receipt in df_period.iterrows():
+            receipt_id = str(receipt.get("Receipt_ID", "")).strip()
+            if "Receipt_ID" in df_all_items.columns:
+                receipt_items = df_all_items[
+                    df_all_items["Receipt_ID"].astype(str).str.strip() == receipt_id
+                ]
+            else:
+                receipt_items = df_all_items.iloc[0:0]
+
+            exact_shares, receipt_allocated_cents = _receipt_spending_exact(
+                receipt_items,
+                _money_to_cents(receipt.get("Header_Discounts", 0)),
+            )
+            allocated_total_cents += receipt_allocated_cents
+            for code, share in exact_shares.items():
+                exact_allocated_cents[code] += share
+
+            receipt_total_value = receipt.get("Grand_Total", "")
+            receipt_total_cents = (
+                _money_to_cents(receipt_total_value)
+                if receipt_total_value is not None and str(receipt_total_value).strip()
+                else receipt_allocated_cents
+            )
+            payer_code = _roommate_code(receipt.get("Paid_By"))
+            if payer_code:
+                paid_cents_by_person[payer_code] += receipt_total_cents
+                receipts_paid_by_person[payer_code] += 1
+
+            detail_rows.append(
+                {
+                    "Receipt ID": receipt_id,
+                    "Date": receipt.get("Date", ""),
+                    "Store": receipt.get("Store", ""),
+                    "Paid By": receipt.get("Paid_By", ""),
+                    "Receipt Total (CHF)": receipt_total_cents / 100,
+                }
+            )
+
+        allocated_cents_by_person = round_shares_to_cents(
+            exact_allocated_cents,
+            allocated_total_cents,
         )
-        st.metric(
-            "Total Spent by Selected Roommate",
-            f"CHF {total_spent_cents / 100:,.2f}",
+        summary_rows = []
+        for roommate, code in _ROOMMATE_INITIALS.items():
+            summary_rows.append(
+                {
+                    "Roommate": roommate,
+                    "Paid for receipts (CHF)": paid_cents_by_person[code] / 100,
+                    "Allocated share (CHF)": allocated_cents_by_person[code] / 100,
+                    "Receipts paid": receipts_paid_by_person[code],
+                }
+            )
+
+        st.subheader("Spending by roommate")
+        st.caption(
+            "Paid for receipts is what they paid at checkout; allocated share is their portion of the items."
+        )
+        st.dataframe(
+            pd.DataFrame(summary_rows),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                column: st.column_config.NumberColumn(column, format="%.2f")
+                for column in [
+                    "Paid for receipts (CHF)",
+                    "Allocated share (CHF)",
+                ]
+            },
         )
 
-        st.divider()
-
-        # Display filtered DataFrame
-        st.subheader(f"Receipts — {selected_user}")
-        display_cols = [c for c in ["Receipt_ID", "Date", "Store", "Paid_By", "Grand_Total"] if c in df_roommate.columns]
-        if display_cols:
-            st.dataframe(df_roommate[display_cols], hide_index=True, use_container_width=True)
-
-        # Download CSV button
-        csv_data = df_roommate.to_csv(index=False).encode("utf-8") if not df_roommate.empty else b"Receipt_ID,Date,Store,Paid_By,Grand_Total\n"
-        st.download_button(
-            label="Download CSV",
-            data=csv_data,
-            file_name=f"wg-finance-{selected_user.replace(' ', '-')}-{start_date}-{end_date}.csv",
-            mime="text/csv",
-        )
+        st.subheader("Receipts in selected period")
+        details_df = pd.DataFrame(detail_rows)
+        if not details_df.empty:
+            st.dataframe(
+                details_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    column: st.column_config.NumberColumn(column, format="%.2f")
+                    for column in ["Receipt Total (CHF)"]
+                },
+            )
+            st.download_button(
+                label="Download CSV",
+                data=details_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"wg-finance-total-spendings-{period_slug}.csv",
+                mime="text/csv",
+            )
+        else:
+            st.info("No receipts found for this period.")
     else:
-        st.info("No receipts found. Upload a receipt to see reports.")
+        st.info("No receipts found. Upload a receipt to see total spendings.")
