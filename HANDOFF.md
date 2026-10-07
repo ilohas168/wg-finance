@@ -87,8 +87,8 @@ Balance < 0 → this person owes others money.
 
 ### Vision Parser Image Preparation (`_prepare_image()` helper)
 - **Purpose:** Preserve receipt text detail while staying below Groq's image request limit.
-- PNG/JPEG inputs up to 14 MiB pass through unchanged at their original dimensions and quality.
-- Larger or unsupported images are converted to JPEG at quality 95, then resized only as much as needed to fit the request budget.
+- JPEG inputs up to 6 MiB pass through unchanged. PNG and oversized inputs are converted to JPEG at quality 95 while preserving original dimensions whenever they fit the request budget.
+- Larger converted images are resized only as much as needed to fit the request budget. Qwen 3.8 is the primary vision model.
 
 ---
 

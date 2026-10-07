@@ -72,9 +72,9 @@ class ItemizedReceipt(BaseModel):
 # --------------------------------------------------------------------------- #
 
 _VISION_MODEL_CANDIDATES: list[str] = [
+    "qwen/qwen3.8-27b",
     "qwen/qwen3.6-27b",
     "meta-llama/llama-4-scout-17b-16e-instruct",
-    "qwen/qwen3.8-27b",
 ]
 
 _SYSTEM_PROMPT: str = """You extract receipts into JSON for a 3-person sharehouse.
@@ -144,22 +144,21 @@ def _strip_markdown_json(raw: str) -> str:
 # Image compression                                                            #
 # --------------------------------------------------------------------------- #
 
-_MAX_INLINE_IMAGE_BYTES = 14 * 1024 * 1024
+_MAX_INLINE_IMAGE_BYTES = 6 * 1024 * 1024
 _JPEG_QUALITY = 95
 
 
 def _prepare_image(image_bytes: bytes) -> tuple[bytes, str]:
     """Preserve image detail and only recompress when needed for the API limit.
 
-    PNG and JPEG inputs below the inline-image budget are passed through at
-    their original dimensions and quality. Larger or unsupported images are
-    converted to JPEG and downscaled only as much as needed.
+    JPEG inputs below the inline-image budget are passed through unchanged.
+    PNG and oversized or unsupported inputs are encoded as quality-95 JPEGs at
+    their original dimensions first, then downscaled only if still oversized.
     """
     with Image.open(io.BytesIO(image_bytes)) as source:
         image_format = (source.format or "").upper()
-        if image_format in {"JPEG", "PNG"} and len(image_bytes) <= _MAX_INLINE_IMAGE_BYTES:
-            mime_type = "image/jpeg" if image_format == "JPEG" else "image/png"
-            return image_bytes, mime_type
+        if image_format == "JPEG" and len(image_bytes) <= _MAX_INLINE_IMAGE_BYTES:
+            return image_bytes, "image/jpeg"
 
         image = ImageOps.exif_transpose(source).convert("RGB")
 
@@ -216,7 +215,7 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
         logger.info("vision_line_items: trying model '%s'", model_name)
         client = _get_client()
 
-        # Preserve full detail for normal photos; recompress only oversized inputs.
+        # Preserve dimensions and text detail; use JPEG to keep payloads compact.
         prepared_image, image_mime_type = _prepare_image(image_bytes)
         b64_image = base64.b64encode(prepared_image).decode("utf-8")
         image_data_url = f"data:{image_mime_type};base64,{b64_image}"
@@ -337,6 +336,12 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
                 last_exc = exc
                 status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
                 error_msg = str(exc).lower()
+                if status_code == 413 or "request_too_large" in error_msg or "request entity too large" in error_msg:
+                    logger.warning(
+                        "vision_line_items: image request too large for '%s' — trying next model",
+                        model_name,
+                    )
+                    break
                 is_transient = (
                     status_code in (429, 503)
                     or "rate limit" in error_msg
