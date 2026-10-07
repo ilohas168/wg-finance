@@ -23,7 +23,7 @@ from app.services.accounting import (
     recover_legacy_weighted_quantities,
     round_shares_to_cents,
 )
-from app.services.reporting import filter_receipts_for_period
+from app.services.reporting import filter_receipts_for_period, parse_receipt_dates
 
 # --------------------------------------------------------------------------- #
 # Page config                                                                  #
@@ -1014,7 +1014,7 @@ elif selected_tab == "Total Spendings":
         df_all_items = pd.DataFrame(columns=["Receipt_ID", "Line_Total", "Beneficiary"])
 
     if not df_receipts.empty and "Date" in df_receipts.columns:
-        receipt_dates = pd.to_datetime(df_receipts["Date"], errors="coerce")
+        receipt_dates = parse_receipt_dates(df_receipts["Date"])
         available_years = sorted(
             {int(year) for year in receipt_dates.dt.year.dropna().unique()},
             reverse=True,
@@ -1114,6 +1114,14 @@ elif selected_tab == "Total Spendings":
                     "Receipts paid": receipts_paid_by_person[code],
                 }
             )
+        summary_rows.append(
+            {
+                "Roommate": "Collective total",
+                "Paid for receipts (CHF)": sum(paid_cents_by_person.values()) / 100,
+                "Allocated share (CHF)": sum(allocated_cents_by_person.values()) / 100,
+                "Receipts paid": len(df_period),
+            }
+        )
 
         st.subheader("Spending by roommate")
         st.caption(
