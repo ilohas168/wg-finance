@@ -515,10 +515,8 @@ def update_receipt(receipt_id: str, receipt_data: dict, items: list[dict]):
     """Update an existing receipt in Google Sheets."""
     # Get current data to find rows
     try:
-        spreadsheet = _open_sheet()
-
-        # Find the receipt row in "Receipts" sheet
-        receipts_ws = spreadsheet.worksheet("Receipts")
+        worksheets = _ensure_all_worksheets()
+        receipts_ws = worksheets["Receipts"]
         receipt_values = receipts_ws.get_all_values()
 
         if not receipt_values or len(receipt_values) < 2:
@@ -530,26 +528,42 @@ def update_receipt(receipt_id: str, receipt_data: dict, items: list[dict]):
             if len(row) > 0 and row[0] == receipt_id:
                 receipt_indices.append(i)
 
-        # Delete existing rows from bottom to top to avoid shifting issues
-        for idx in sorted(receipt_indices, reverse=True):
-            receipts_ws.batch_update({'deletions': str(idx)})
+        if not receipt_indices:
+            raise ValueError(f"Receipt {receipt_id} was not found")
 
         # Find item rows in "Receipt_Items" sheet
-        items_ws = spreadsheet.worksheet("Receipt_Items")
+        items_ws = worksheets["Receipt_Items"]
         items_values = items_ws.get_all_values()
-
-        if not items_values or len(items_values) < 2:
-            raise ValueError(f"No receipt items found to update for {receipt_id}")
 
         # Find item rows
         item_indices = []
-        for i, row in enumerate(items_values[1:], start=2):  # Start from 2 since row index is 1-based
+        for i, row in enumerate(items_values[1:], start=2):
             if len(row) > 0 and row[0] == receipt_id:
                 item_indices.append(i)
 
-        # Delete existing rows from bottom to top to avoid shifting issues
-        for idx in sorted(item_indices, reverse=True):
-            items_ws.batch_update({'deletions': str(idx)})
+        # Worksheet.batch_update updates cell values; row deletion must use
+        # the Sheets API's deleteDimension request. Delete bottom-up so earlier
+        # row indices remain valid within each worksheet.
+        requests = []
+        for worksheet, row_numbers in (
+            (receipts_ws, receipt_indices),
+            (items_ws, item_indices),
+        ):
+            for row_num in sorted(row_numbers, reverse=True):
+                requests.append(
+                    {
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": worksheet.id,
+                                "dimension": "ROWS",
+                                "startIndex": row_num - 1,
+                                "endIndex": row_num,
+                            }
+                        }
+                    }
+                )
+
+        receipts_ws.spreadsheet.batch_update({"requests": requests})
 
         # Append new data
         save_receipt(receipt_data, items)
