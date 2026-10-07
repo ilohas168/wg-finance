@@ -429,11 +429,8 @@ def _prepare_receipt_items_for_editing(items: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _edit_one_line_item(
-    items: pd.DataFrame,
-    key_prefix: str,
-) -> tuple[pd.DataFrame, bool]:
-    """Render explicit inputs for one selected item and return submitted edits."""
+def _edit_line_items_inline(items: pd.DataFrame, editor_key: str) -> pd.DataFrame:
+    """Render editable line-item rows and reconcile edited amounts."""
     view_columns = [
         "Product_Name",
         "Category",
@@ -443,126 +440,93 @@ def _edit_one_line_item(
         "Line_Total",
         "Beneficiary",
     ]
-    visible_items = items[[column for column in view_columns if column in items.columns]]
-    st.dataframe(visible_items, hide_index=True, use_container_width=True)
-
-    row_options = list(range(len(items)))
-
-    def format_item(row_index: int) -> str:
-        row = items.iloc[row_index]
-        name = str(row.get("Product_Name", "Item"))
-        numeric_total = pd.to_numeric(row.get("Line_Total", 0), errors="coerce")
-        total = 0.0 if pd.isna(numeric_total) else float(numeric_total)
-        return f"{row_index + 1}. {name} — CHF {total:,.2f}"
-
-    selected_index = st.selectbox(
-        "Choose a line item to edit",
-        options=row_options,
-        format_func=format_item,
-        key=f"{key_prefix}_selected",
-    )
-    row = items.iloc[selected_index]
+    visible_columns = [column for column in view_columns if column in items.columns]
+    visible_items = items[visible_columns].copy().reset_index(drop=True)
     category_options = ["Food", "Drink", "Toiletries", "Household", "General"]
     beneficiary_options = list(_BENEFICIARY_LABELS.values())
 
-    def number_value(column: str, default: float) -> float:
+    edited_visible = st.data_editor(
+        visible_items,
+        column_config={
+            "Product_Name": st.column_config.TextColumn("Name", width="medium"),
+            "Category": st.column_config.SelectboxColumn(
+                "Category", options=category_options, width="small"
+            ),
+            "Qty": st.column_config.NumberColumn(
+                "Qty", min_value=0.0, step=0.001, format="%.3f", width="small"
+            ),
+            "Unit_Price": st.column_config.NumberColumn(
+                "Unit Price (CHF)", step=0.01, format="%.4f", width="small"
+            ),
+            "Discount": st.column_config.NumberColumn(
+                "Discount (CHF)", step=0.01, format="%.2f", width="small"
+            ),
+            "Line_Total": st.column_config.NumberColumn(
+                "Line Total (CHF)", step=0.01, format="%.2f", width="small"
+            ),
+            "Beneficiary": st.column_config.SelectboxColumn(
+                "Who pays for this item",
+                options=beneficiary_options,
+                width="medium",
+            ),
+        },
+        column_order=visible_columns,
+        hide_index=True,
+        num_rows="fixed",
+        width="stretch",
+        key=editor_key,
+    )
+
+    updated = items.copy().reset_index(drop=True)
+    for column in visible_columns:
+        updated[column] = edited_visible[column].reset_index(drop=True)
+
+    for column, default in (("Qty", 1.0), ("Unit_Price", 0.0), ("Discount", 0.0), ("Line_Total", 0.0)):
+        if column in updated.columns:
+            updated[column] = pd.to_numeric(updated[column], errors="coerce").fillna(default)
+
+    def number_value(row: pd.Series, column: str, default: float) -> float:
         value = pd.to_numeric(row.get(column, default), errors="coerce")
         return default if pd.isna(value) else float(value)
 
-    with st.form(f"{key_prefix}_form_{selected_index}"):
-        item_name = st.text_input(
-            "Name",
-            value=str(row.get("Product_Name", "")),
-            key=f"{key_prefix}_name_{selected_index}",
-        )
-        category_index = category_options.index(row.get("Category", "General"))
-        category_cols = st.columns(2)
-        with category_cols[0]:
-            category = st.selectbox(
-                "Category",
-                options=category_options,
-                index=category_index,
-                key=f"{key_prefix}_category_{selected_index}",
-            )
-        beneficiary_index = beneficiary_options.index(row.get("Beneficiary", beneficiary_options[0]))
-        with category_cols[1]:
-            beneficiary = st.selectbox(
-                "Who pays for this item",
-                options=beneficiary_options,
-                index=beneficiary_index,
-                key=f"{key_prefix}_beneficiary_{selected_index}",
-            )
-
-        value_cols = st.columns(4)
-        with value_cols[0]:
-            quantity = st.number_input(
-                "Qty",
-                min_value=0.001,
-                value=max(0.001, number_value("Qty", 1.0)),
-                step=0.001,
-                format="%.3f",
-                key=f"{key_prefix}_qty_{selected_index}",
-            )
-        with value_cols[1]:
-            unit_price = st.number_input(
-                "Unit Price (CHF)",
-                value=number_value("Unit_Price", 0.0),
-                step=0.01,
-                format="%.4f",
-                key=f"{key_prefix}_unit_price_{selected_index}",
-            )
-        with value_cols[2]:
-            discount = st.number_input(
-                "Discount (CHF)",
-                value=number_value("Discount", 0.0),
-                step=0.01,
-                format="%.2f",
-                key=f"{key_prefix}_discount_{selected_index}",
-            )
-        with value_cols[3]:
-            line_total = st.number_input(
-                "Line Total (CHF)",
-                value=number_value(
-                    "Line_Total",
-                    number_value("Qty", 1.0) * number_value("Unit_Price", 0.0)
-                    - number_value("Discount", 0.0),
-                ),
-                step=0.01,
-                format="%.2f",
-                key=f"{key_prefix}_line_total_{selected_index}",
-            )
-
-        apply_clicked = st.form_submit_button("Apply item changes")
-
-    updated = items.copy()
-    if apply_clicked:
-        original_quantity = number_value("Qty", 1.0)
-        original_unit_price = number_value("Unit_Price", 0.0)
-        original_discount = number_value("Discount", 0.0)
-        original_line_total = number_value(
-            "Line_Total",
-            original_quantity * original_unit_price - original_discount,
-        )
-        resolved_line_total, resolved_unit_price = resolve_line_item_amounts(
-            original_quantity,
-            original_unit_price,
+    for index in range(len(updated)):
+        original = items.reset_index(drop=True).iloc[index]
+        edited = updated.iloc[index]
+        original_qty = number_value(original, "Qty", 1.0)
+        original_price = number_value(original, "Unit_Price", 0.0)
+        original_discount = number_value(original, "Discount", 0.0)
+        original_total = number_value(original, "Line_Total", 0.0)
+        resolved_total, resolved_price = resolve_line_item_amounts(
+            original_qty,
+            original_price,
             original_discount,
-            original_line_total,
-            float(quantity),
-            float(unit_price),
-            float(discount),
-            float(line_total),
+            original_total,
+            float(edited.get("Qty", original_qty)),
+            float(edited.get("Unit_Price", original_price)),
+            float(edited.get("Discount", original_discount)),
+            float(edited.get("Line_Total", original_total)),
         )
+        updated.at[index, "Line_Total"] = resolved_total
+        updated.at[index, "Unit_Price"] = resolved_price
 
-        updated.at[selected_index, "Product_Name"] = item_name
-        updated.at[selected_index, "Category"] = category
-        updated.at[selected_index, "Qty"] = float(quantity)
-        updated.at[selected_index, "Unit_Price"] = resolved_unit_price
-        updated.at[selected_index, "Discount"] = float(discount)
-        updated.at[selected_index, "Line_Total"] = resolved_line_total
-        updated.at[selected_index, "Beneficiary"] = beneficiary
-        updated["Split_Type"] = updated["Beneficiary"].apply(_split_type_for_beneficiary)
-    return updated, apply_clicked
+    if "Beneficiary" in updated.columns:
+        updated["Split_Type"] = updated["Beneficiary"].apply(
+            _split_type_for_beneficiary
+        )
+    return updated
+
+
+def _receipt_items_for_view(df_all_items: pd.DataFrame, receipt_id: str) -> pd.DataFrame:
+    """Use unsaved inline edits for visible totals, otherwise use saved rows."""
+    pending_key = f"past_receipt_items_{receipt_id}"
+    pending_items = st.session_state.get(pending_key)
+    if isinstance(pending_items, pd.DataFrame):
+        return pending_items.copy()
+    if "Receipt_ID" not in df_all_items.columns:
+        return df_all_items.iloc[0:0].copy()
+    return df_all_items[
+        df_all_items["Receipt_ID"].astype(str).str.strip() == receipt_id
+    ].copy()
 
 
 def _load_items_df(raw_dict: Optional[dict]) -> pd.DataFrame:
@@ -666,8 +630,6 @@ if selected_tab == "Upload Receipt":
     # Edit area & summary.
     if st.session_state.has_parsed and st.session_state.raw_items_df is not None and not st.session_state.raw_items_df.empty:
         df = st.session_state.raw_items_df.copy()
-        df["Line_Total"] = _compute_line_totals(df)
-        st.session_state.raw_items_df = df
 
         if "upload_receipt_date" not in st.session_state:
             parsed_receipt_date = parse_receipt_dates(
@@ -689,9 +651,7 @@ if selected_tab == "Upload Receipt":
 
         st.subheader("Line-items")
         st.caption(
-            "Choose a line item below, edit its fields, then apply the changes. "
-            "Line Total is editable and drives allocations. Changing Qty, Unit Price, or Discount "
-            "recalculates it; changing Line Total adjusts Unit Price to match."
+            "Edit the Line Total directly in the table. Changes update the allocation immediately."
         )
         # Display labels for the Beneficiary column.
         _ben_options = list(_BENEFICIARY_LABELS.values())  # e.g. ["All (Shin…)", "Shin", ...]
@@ -708,19 +668,35 @@ if selected_tab == "Upload Receipt":
             )
 
         editor_id = st.session_state.setdefault("upload_item_editor_id", uuid4().hex)
-        edited_df, item_edit_applied = _edit_one_line_item(
+        editor_version = st.session_state.get("upload_item_editor_version", 0)
+        edited_df = _edit_line_items_inline(
             df.copy(),
-            f"upload_item_{editor_id}",
+            f"upload_line_items_{editor_id}_{editor_version}",
         )
-        if item_edit_applied:
+        visible_columns = [
+            column
+            for column in [
+                "Product_Name",
+                "Category",
+                "Qty",
+                "Unit_Price",
+                "Discount",
+                "Line_Total",
+                "Beneficiary",
+            ]
+            if column in df.columns
+        ]
+        if not edited_df[visible_columns].equals(
+            df[visible_columns].reset_index(drop=True)
+        ):
             st.session_state.raw_items_df = edited_df.copy()
+            st.session_state["upload_item_editor_version"] = editor_version + 1
             st.rerun()
 
         # Re-capture edits into session state.
         for col in ["Qty", "Unit_Price", "Discount"]:
             if col in edited_df.columns:
                 edited_df[col] = pd.to_numeric(edited_df[col], errors="coerce").fillna(0)
-        edited_df["Line_Total"] = _compute_line_totals(edited_df)
         edited_df["Split_Type"] = edited_df["Beneficiary"].apply(_split_type_for_beneficiary)
         st.session_state.raw_items_df = edited_df
 
@@ -846,12 +822,7 @@ elif selected_tab == "Past Receipts":
         summary_rows = []
         for _, receipt in df_receipts.iterrows():
             rid = str(receipt.get("Receipt_ID", "")).strip()
-            if "Receipt_ID" in df_all_items.columns:
-                receipt_items = df_all_items[
-                    df_all_items["Receipt_ID"].astype(str).str.strip() == rid
-                ]
-            else:
-                receipt_items = df_all_items.iloc[0:0]
+            receipt_items = _receipt_items_for_view(df_all_items, rid)
             header_discount = _money_to_cents(receipt.get("Header_Discounts", 0))
             shares = _receipt_spending_cents(receipt_items, header_discount)
             receipt_total_cents = _money_to_cents(receipt.get("Grand_Total", 0))
@@ -988,19 +959,38 @@ elif selected_tab == "Past Receipts":
                 if not df_items.empty:
                     st.subheader("Line-items")
                     st.caption(
-                        "Choose a line item below, edit its fields, then apply the changes. "
-                        "Line Total is editable and drives allocations. Changing Qty, Unit Price, "
-                        "or Discount recalculates it; changing Line Total adjusts Unit Price to match."
+                        "Edit Line Total in the row. The allocated total updates immediately; "
+                        "click Update Receipt to save."
                     )
-                    edited_df, item_edit_applied = _edit_one_line_item(
+                    editor_version_key = f"past_receipt_editor_version_{selected_rid}"
+                    editor_version = st.session_state.get(editor_version_key, 0)
+                    editor_key = (
+                        f"past_receipt_line_items_{selected_rid}_{editor_version}"
+                    )
+                    edited_df = _edit_line_items_inline(
                         df_items,
-                        f"receipt_item_{selected_rid}",
+                        editor_key,
                     )
-                    if item_edit_applied:
+                    visible_columns = [
+                        column
+                        for column in [
+                            "Product_Name",
+                            "Category",
+                            "Qty",
+                            "Unit_Price",
+                            "Discount",
+                            "Line_Total",
+                            "Beneficiary",
+                        ]
+                        if column in df_items.columns
+                    ]
+                    if not edited_df[visible_columns].equals(
+                        df_items[visible_columns].reset_index(drop=True)
+                    ):
                         st.session_state[items_state_key] = edited_df.copy()
+                        st.session_state[editor_version_key] = editor_version + 1
                         st.rerun()
-
-                    edited_df = st.session_state[items_state_key].copy()
+                    st.session_state[items_state_key] = edited_df.copy()
 
                     col_update, _ = st.columns([1, 5])
                     with col_update:
@@ -1016,10 +1006,16 @@ elif selected_tab == "Past Receipts":
                                     "Receipt_ID": selected_rid,
                                     "Date": df_receipts[df_receipts["Receipt_ID"] == selected_rid]["Date"].iloc[0] if selected_rid in df_receipts["Receipt_ID"].values else "",
                                     "Store": df_receipts[df_receipts["Receipt_ID"] == selected_rid]["Store"].iloc[0] if selected_rid in df_receipts["Store"].values else "",
-                                    "Paid_By": selected_user,
-                                    "Header_Discounts": 0.0,
-                                    "Grand_Total": float(edited_df["Line_Total"].sum()),
-                                    "Shared_Total": 0.0,
+                                    "Paid_By": selected_receipt.get("Paid_By", selected_user),
+                                    "Header_Discounts": _money_to_cents(selected_receipt.get("Header_Discounts", 0)) / 100,
+                                    "Grand_Total": _summarise_receipt(
+                                        edited_df,
+                                        _money_to_cents(selected_receipt.get("Header_Discounts", 0)) / 100,
+                                    )["grand_total"],
+                                    "Shared_Total": _summarise_receipt(
+                                        edited_df,
+                                        _money_to_cents(selected_receipt.get("Header_Discounts", 0)) / 100,
+                                    )["shared_total"],
                                     "Notes": "",
                                 }
                                 items = clean_df.to_dict(orient="records")
@@ -1027,9 +1023,7 @@ elif selected_tab == "Past Receipts":
                             st.toast(f"Updated receipt **{selected_rid}**", icon="✅")
                             st.success(f"Receipt **{selected_rid}** updated successfully.")
                             st.session_state.pop(items_state_key, None)
-                            for state_key in list(st.session_state):
-                                if state_key.startswith(f"receipt_item_{selected_rid}_"):
-                                    st.session_state.pop(state_key, None)
+                            st.session_state[editor_version_key] = editor_version + 1
                             st.rerun()
                         except Exception as exc:
                             st.error(f"Error updating receipt: {str(exc)}")
@@ -1286,12 +1280,7 @@ elif selected_tab == "Total Spendings":
 
         for _, receipt in df_period.iterrows():
             receipt_id = str(receipt.get("Receipt_ID", "")).strip()
-            if "Receipt_ID" in df_all_items.columns:
-                receipt_items = df_all_items[
-                    df_all_items["Receipt_ID"].astype(str).str.strip() == receipt_id
-                ]
-            else:
-                receipt_items = df_all_items.iloc[0:0]
+            receipt_items = _receipt_items_for_view(df_all_items, receipt_id)
 
             exact_shares, receipt_allocated_cents = _receipt_spending_exact(
                 receipt_items,
