@@ -559,6 +559,60 @@ def update_receipt(receipt_id: str, receipt_data: dict, items: list[dict]):
         raise
 
 
+def delete_receipt(receipt_id: str) -> tuple[int, int]:
+    """Delete one receipt and its line items from Google Sheets.
+
+    Deletions for both worksheets are sent in one Sheets API batch so a receipt
+    cannot be removed from the header sheet while leaving its items behind.
+    Returns ``(receipt_rows_deleted, item_rows_deleted)``.
+    """
+    receipt_id = str(receipt_id).strip()
+    if not receipt_id:
+        raise ValueError("A receipt ID is required for deletion.")
+
+    worksheets = _ensure_all_worksheets()
+    receipts_ws = worksheets["Receipts"]
+    items_ws = worksheets["Receipt_Items"]
+    receipt_values = receipts_ws.get_all_values()
+    item_values = items_ws.get_all_values()
+
+    receipt_rows = [
+        row_num
+        for row_num, row in enumerate(receipt_values[1:], start=2)
+        if row and str(row[0]).strip() == receipt_id
+    ]
+    if not receipt_rows:
+        raise ValueError(f"Receipt {receipt_id} was not found.")
+
+    item_rows = [
+        row_num
+        for row_num, row in enumerate(item_values[1:], start=2)
+        if row and str(row[0]).strip() == receipt_id
+    ]
+
+    requests = []
+    for worksheet, row_numbers in ((receipts_ws, receipt_rows), (items_ws, item_rows)):
+        for row_num in sorted(row_numbers, reverse=True):
+            requests.append(
+                {
+                    "deleteDimension": {
+                        "range": {
+                            "sheetId": worksheet.id,
+                            "dimension": "ROWS",
+                            "startIndex": row_num - 1,
+                            "endIndex": row_num,
+                        }
+                    }
+                }
+            )
+
+    receipts_ws.spreadsheet.batch_update({"requests": requests})
+    logger.info(
+        "Deleted receipt %s and %d associated item rows.", receipt_id, len(item_rows)
+    )
+    return len(receipt_rows), len(item_rows)
+
+
 def append_settlement(from_roommate: str, to_roommate: str, amount: float, method: str = "Bank Transfer") -> str:
     """Append a settlement record to the 'Settlements' sheet."""
     # Generate settlement_id

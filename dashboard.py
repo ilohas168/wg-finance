@@ -482,6 +482,11 @@ if selected_tab == "Upload Receipt":
 elif selected_tab == "Edit History":
     st.title("Edit History")
     st.caption("Browse and edit historical receipts.")
+    if st.session_state.pop("clear_edit_receipt_select", False):
+        st.session_state.pop("edit_receipt_select", None)
+    delete_message = st.session_state.pop("receipt_delete_message", None)
+    if delete_message:
+        st.success(delete_message)
 
     try:
         with st.spinner("Loading receipts…"):
@@ -576,6 +581,57 @@ elif selected_tab == "Edit History":
                             st.error(f"Error updating receipt: {str(exc)}")
                 else:
                     st.info("No items found for this receipt.")
+
+                st.divider()
+                st.subheader("Delete receipt")
+                st.caption("This also removes its line items and updates balances and reports.")
+                if st.button("Delete this receipt", key=f"delete_receipt_{selected_rid}"):
+                    st.session_state["confirm_delete_receipt_id"] = selected_rid
+                    st.rerun()
+
+                if st.session_state.get("confirm_delete_receipt_id") == selected_rid:
+                    receipt_row = df_receipts[df_receipts["Receipt_ID"] == selected_rid]
+                    receipt_store = (
+                        str(receipt_row["Store"].iloc[0])
+                        if not receipt_row.empty and "Store" in receipt_row.columns
+                        else "this receipt"
+                    )
+                    st.warning(
+                        f"Delete **{receipt_store}** ({selected_rid}) permanently? "
+                        "The receipt and all its items will be removed."
+                    )
+                    confirm_col, cancel_col, _ = st.columns([1.5, 1, 5])
+                    with confirm_col:
+                        confirm_delete = st.button(
+                            "Confirm delete",
+                            type="primary",
+                            key=f"confirm_delete_{selected_rid}",
+                        )
+                    with cancel_col:
+                        cancel_delete = st.button(
+                            "Cancel",
+                            key=f"cancel_delete_{selected_rid}",
+                        )
+
+                    if confirm_delete:
+                        try:
+                            with st.spinner("Deleting receipt…"):
+                                from app.services.ledger import delete_receipt  # type: ignore
+
+                                _, deleted_items = delete_receipt(selected_rid)
+                        except Exception as exc:
+                            st.error(f"Error deleting receipt: {exc}")
+                        else:
+                            st.session_state.pop("confirm_delete_receipt_id", None)
+                            st.session_state["clear_edit_receipt_select"] = True
+                            st.session_state["receipt_delete_message"] = (
+                                f"Deleted receipt {selected_rid} and "
+                                f"{deleted_items} associated line item(s)."
+                            )
+                            st.rerun()
+                    elif cancel_delete:
+                        st.session_state.pop("confirm_delete_receipt_id", None)
+                        st.rerun()
             except Exception as exc:
                 st.error(f"Failed to load items: {exc}")
     else:
