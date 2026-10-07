@@ -1,7 +1,7 @@
 """Streamlit dashboard for WG Sharehouse — upload, edit, balances, and reports.
 
 Pages:
-  1. **Upload Receipt** — upload / camera-capture a receipt, parse with Groq
+  1. **Upload Receipt** — upload a receipt image, parse with Groq
      vision, edit line-items in-place, then save to Google Sheets (new schema).
   2. **Past Receipts** — browse historical receipts, see roommate shares, edit or delete.
   3. **Balances & Settlements** — per-roommate balances, who-owes-whom matrix,
@@ -453,14 +453,7 @@ if selected_tab == "Upload Receipt":
     st.caption("Send a receipt photo, edit line-items, and save to the shared ledger.")
 
     uploaded_file = st.file_uploader("Upload receipt image", type=["png", "jpg", "jpeg"], key="file_uploader")
-    camera_img = st.camera_input("Or take a photo", key="camera_input")
-
-    # Determine source bytes.
-    image_bytes: Optional[bytes] = None
-    if uploaded_file is not None:
-        image_bytes = uploaded_file.getvalue()
-    elif camera_img is not None:
-        image_bytes = camera_img.getvalue()
+    image_bytes: Optional[bytes] = uploaded_file.getvalue() if uploaded_file is not None else None
 
     col_parse, _ = st.columns([1, 5])
     with col_parse:
