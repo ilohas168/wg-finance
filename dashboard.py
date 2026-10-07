@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 import streamlit as st
 import pandas as pd
+from app.services.accounting import round_shares_to_cents
 
 # --------------------------------------------------------------------------- #
 # Page config                                                                  #
@@ -245,50 +246,49 @@ def _beneficiary_codes(value: Any) -> list[str]:
     return ["A", "B", "C"] if code == "ALL" else [part for part in "ABC" if part in code]
 
 
-def _split_cents(amount_cents: int, beneficiary_codes: list[str]) -> dict[str, int]:
-    """Split cents exactly, assigning any remainder in stable roommate order."""
-    if not beneficiary_codes:
-        beneficiary_codes = ["A", "B", "C"]
-    sign = -1 if amount_cents < 0 else 1
-    quotient, remainder = divmod(abs(amount_cents), len(beneficiary_codes))
-    return {
-        code: sign * (quotient + (1 if index < remainder else 0))
-        for index, code in enumerate(beneficiary_codes)
-    }
+def _receipt_spending_exact(
+    items_df: pd.DataFrame, header_discount_cents: int = 0
+) -> tuple[dict[str, Decimal], int]:
+    """Return exact cent shares and the receipt's net item total."""
+    exact_spending = {code: Decimal(0) for code in "ABC"}
+    if items_df.empty:
+        return exact_spending, 0
+    item_total_cents = 0
+    for _, item in items_df.iterrows():
+        amount = _line_total_cents(item)
+        item_total_cents += amount
+        codes = _beneficiary_codes(item.get("Beneficiary", "ALL"))
+        exact_share = Decimal(amount) / len(codes)
+        for code in codes:
+            exact_spending[code] += exact_share
+
+    # Apportion any receipt-wide discount by positive item spending before
+    # rounding, so row-level remainders do not accumulate against one person.
+    if header_discount_cents != 0:
+        weights = {
+            code: max(Decimal(0), amount)
+            for code, amount in exact_spending.items()
+        }
+        weight_total = sum(weights.values())
+        if not weight_total:
+            weights = {code: Decimal(1) for code in "ABC"}
+            weight_total = Decimal(len(weights))
+        for code in "ABC":
+            exact_spending[code] -= (
+                Decimal(header_discount_cents) * weights[code] / weight_total
+            )
+
+    return exact_spending, item_total_cents - header_discount_cents
 
 
 def _receipt_spending_cents(
     items_df: pd.DataFrame, header_discount_cents: int = 0
 ) -> dict[str, int]:
-    """Allocate a receipt's net cost among the selected beneficiaries."""
-    spending = {code: 0 for code in "ABC"}
-    if items_df.empty:
-        return spending
-    for _, item in items_df.iterrows():
-        amount = _line_total_cents(item)
-        for code, share in _split_cents(
-            amount, _beneficiary_codes(item.get("Beneficiary", "ALL"))
-        ).items():
-            spending[code] += share
-
-    # A receipt-wide discount is apportioned by each roommate's positive item
-    # spending, with any leftover cents assigned by largest fractional share.
-    if header_discount_cents > 0:
-        weights = {code: max(0, amount) for code, amount in spending.items()}
-        weight_total = sum(weights.values())
-        if weight_total:
-            allocations = {}
-            remainders = {}
-            for code in "ABC":
-                allocations[code], remainders[code] = divmod(
-                    header_discount_cents * weights[code], weight_total
-                )
-            cents_left = header_discount_cents - sum(allocations.values())
-            for code in sorted("ABC", key=lambda key: (-remainders[key], "ABC".index(key)))[:cents_left]:
-                allocations[code] += 1
-            for code in "ABC":
-                spending[code] -= allocations[code]
-    return spending
+    """Allocate a receipt's net cost among its selected beneficiaries."""
+    exact_spending, target_total_cents = _receipt_spending_exact(
+        items_df, header_discount_cents
+    )
+    return round_shares_to_cents(exact_spending, target_total_cents)
 
 
 def _calculate_balance_cents(
@@ -299,6 +299,8 @@ def _calculate_balance_cents(
 ) -> dict[str, int]:
     """Compute net debts/credits using payer credits and beneficiary shares."""
     balances = {code: 0 for code in "ABC"}
+    exact_spending = {code: Decimal(0) for code in "ABC"}
+    allocated_total_cents = 0
     if not receipts_df.empty and "Receipt_ID" in receipts_df.columns:
         for _, receipt in receipts_df.iterrows():
             receipt_id = str(receipt.get("Receipt_ID", "")).strip()
@@ -311,16 +313,24 @@ def _calculate_balance_cents(
             if not payer:
                 continue
             header_discount = _money_to_cents(receipt.get("Header_Discounts", 0))
-            shares = _receipt_spending_cents(receipt_items, header_discount)
+            receipt_exact_spending, receipt_allocated_total = _receipt_spending_exact(
+                receipt_items, header_discount
+            )
+            allocated_total_cents += receipt_allocated_total
+            for code, share in receipt_exact_spending.items():
+                exact_spending[code] += share
             receipt_total = receipt.get("Grand_Total", "")
             paid_cents = (
                 _money_to_cents(receipt_total)
                 if receipt_total is not None and str(receipt_total).strip()
-                else sum(shares.values())
+                else receipt_allocated_total
             )
             balances[payer] += paid_cents
-            for code, share in shares.items():
-                balances[code] -= share
+
+    # Round cumulative spending once, avoiding a cent of bias per receipt.
+    total_spending = round_shares_to_cents(exact_spending, allocated_total_cents)
+    for code, share in total_spending.items():
+        balances[code] -= share
 
     if not settlements_df.empty:
         for _, settlement in settlements_df.iterrows():
