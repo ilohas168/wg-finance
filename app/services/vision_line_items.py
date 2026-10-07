@@ -108,7 +108,10 @@ Read the receipt carefully, especially the final amount at the bottom:
 - beneficiary is the only per-item allocation field: one of A, B, C, AB, BC,
   AC, or ALL. Default to ALL. Do not output a separate Shared/Private field.
 - category must be one of Food, Drink, Toiletries, Household, General.
-- date must use YYYY-MM-DD; infer only when it is not printed.
+- For Swiss numeric dates, interpret the printed order as day.month.year
+  (DD.MM.YYYY), never month.day.year. For example, 12.9.2026 means
+  2026-09-12, not 2026-12-09.
+- Return date as YYYY-MM-DD; infer only when it is not printed.
 
 JSON shape:
 {

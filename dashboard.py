@@ -476,6 +476,14 @@ if selected_tab == "Upload Receipt":
             st.session_state.receipt_total_input = float(raw_dict.total_amount)
             st.session_state.header_discounts_input = float(raw_dict.header_discounts)
             st.session_state.has_parsed = True
+            parsed_receipt_date = parse_receipt_dates(
+                pd.Series([raw_dict.date])
+            ).iloc[0]
+            st.session_state["upload_receipt_date"] = (
+                parsed_receipt_date.date()
+                if pd.notna(parsed_receipt_date)
+                else date.today()
+            )
             st.info(f"Parsed receipt from **{raw_dict.merchant}** on **{raw_dict.date}** — {len(raw_dict.items)} items.")
         except Exception as exc:
             st.error(f"Failed to parse receipt: {exc}")
@@ -485,6 +493,24 @@ if selected_tab == "Upload Receipt":
         df = st.session_state.raw_items_df.copy()
         df["Line_Total"] = _compute_line_totals(df)
         st.session_state.raw_items_df = df
+
+        if "upload_receipt_date" not in st.session_state:
+            parsed_receipt_date = parse_receipt_dates(
+                pd.Series([st.session_state.parsed_dict.get("date", "")])
+            ).iloc[0]
+            st.session_state["upload_receipt_date"] = (
+                parsed_receipt_date.date()
+                if pd.notna(parsed_receipt_date)
+                else date.today()
+            )
+        receipt_date = st.date_input(
+            "Receipt date",
+            key="upload_receipt_date",
+        )
+        st.caption(
+            "Check this against the receipt before saving. Swiss dates use day.month.year; "
+            "OCR can sometimes swap day and month."
+        )
 
         st.subheader("Line-items")
         # Display labels for the Beneficiary column.
@@ -603,7 +629,7 @@ if selected_tab == "Upload Receipt":
 
                     receipt_data = {
                         "Receipt_ID": f"REC-{datetime.now():%Y%m%d-%H%M%S}",
-                        "Date": st.session_state.parsed_dict.get("date", datetime.now().strftime("%Y-%m-%d")),
+                        "Date": receipt_date.isoformat(),
                         "Store": st.session_state.parsed_dict.get("merchant", ""),
                         "Paid_By": _payer,
                         "Header_Discounts": header_disc,
