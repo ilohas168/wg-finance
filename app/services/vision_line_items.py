@@ -276,10 +276,69 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
                 cleaned = _strip_markdown_json(content)
                 receipt = ItemizedReceipt.model_validate_json(cleaned)
 
+                # Isolate product-name OCR from numeric extraction. When the
+                # model handles names, weights, and columns together it can
+                # normalize unfamiliar labels or shift text between rows.
+                try:
+                    names_response = client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a receipt OCR transcriber. Copy visible text exactly; "
+                                    "never autocorrect or infer product names. Return valid JSON only."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": (
+                                            "Transcribe only the item descriptions in the leftmost Artikel column, "
+                                            "top to bottom. Preserve the printed spelling, capitalization, "
+                                            "abbreviations, and truncation, even when a name looks misspelled. "
+                                            "Do not translate, expand, or guess unreadable characters; use ? only "
+                                            f"for an unreadable character. Return exactly {len(receipt.items)} "
+                                            "strings in a JSON object shaped as {\"names\":[\"...\"]}. "
+                                            "These images are overlapping views of one receipt: deduplicate rows "
+                                            "visible in overlaps. Include discounts as printed rows."
+                                        ),
+                                    },
+                                    *image_content,
+                                ],
+                            },
+                        ],
+                        response_format={"type": "json_object"},
+                        max_tokens=2048,
+                    )
+                    names_content = names_response.choices[0].message.content
+                    if names_content:
+                        names_data = json.loads(_strip_markdown_json(names_content))
+                        names = names_data.get("names") if isinstance(names_data, dict) else None
+                        if (
+                            isinstance(names, list)
+                            and len(names) == len(receipt.items)
+                            and all(isinstance(name, str) and name.strip() for name in names)
+                        ):
+                            for item, name in zip(receipt.items, names):
+                                item.name = name.strip()
+                        else:
+                            logger.warning(
+                                "vision_line_items: focused name OCR returned %s names for %d items; keeping original names",
+                                len(names) if isinstance(names, list) else "invalid",
+                                len(receipt.items),
+                            )
+                except Exception:
+                    logger.exception(
+                        "vision_line_items: focused name OCR failed; keeping names from full parse"
+                    )
+
                 # If extracted rows do not reconcile to the printed footer,
-                # give the vision model one focused pass to re-check row/column
-                # alignment. Keep whichever parse is closer; never fabricate a
-                # balancing item or turn the discrepancy into a charge.
+                # re-read only the far-right Total column. This isolates line
+                # totals from unit prices and quantities. Keep a correction
+                # only when it improves the match; never force-balance rows.
                 item_total = round(
                     sum(item.price for item in receipt.items) - receipt.header_discounts,
                     2,
@@ -296,19 +355,28 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
                         correction_response = client.chat.completions.create(
                             model=model_name,
                             messages=[
-                                {"role": "system", "content": _SYSTEM_PROMPT},
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "You are transcribing receipt line totals. Read the printed columns "
+                                        "carefully and return valid JSON only. Never calculate a balancing amount."
+                                    ),
+                                },
                                 {
                                     "role": "user",
                                     "content": [
                                         {
                                             "type": "text",
                                             "text": (
-                                                "Re-read every printed item row and return corrected JSON. "
-                                                f"Your previous item rows total CHF {item_total:.2f} after header "
-                                                f"discounts, while the receipt footer says CHF {receipt.total_amount:.2f} "
-                                                f"(difference CHF {initial_gap:.2f}). Check for omitted rows and values "
-                                                "shifted between adjacent rows, especially the rightmost Total column. "
-                                                "Do not invent a balancing item, duplicate an Aktion discount, or add tax twice."
+                                                f"Read only the far-right Total column for exactly {len(receipt.items)} "
+                                                "item rows, in top-to-bottom order. Return a JSON object with exactly "
+                                                f"{len(receipt.items)} numeric values in a `prices` array. Each value "
+                                                "must be copied from that row's rightmost Total cell. Ignore Menge, "
+                                                "Preis, and Aktion; do not multiply, subtract, infer, or shift values "
+                                                "between rows. A separate trailing-minus discount is negative. "
+                                                f"The earlier row sum was CHF {item_total:.2f}; the printed footer "
+                                                f"is CHF {receipt.total_amount:.2f}. Do not adjust any value just "
+                                                "to make the sum match; copy the printed cells even if they do not add up."
                                             ),
                                         },
                                         *image_content,
@@ -316,36 +384,46 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
                                 },
                             ],
                             response_format={"type": "json_object"},
-                            max_tokens=4096,
+                            max_tokens=2048,
                         )
                         correction_content = correction_response.choices[0].message.content
                         if correction_content:
-                            corrected = ItemizedReceipt.model_validate_json(
-                                _strip_markdown_json(correction_content)
-                            )
-                            corrected_total = round(
-                                sum(item.price for item in corrected.items)
-                                - corrected.header_discounts,
-                                2,
-                            )
+                            price_data = json.loads(_strip_markdown_json(correction_content))
+                            prices = price_data.get("prices") if isinstance(price_data, dict) else None
+                            if not (
+                                isinstance(prices, list)
+                                and len(prices) == len(receipt.items)
+                                and all(
+                                    isinstance(price, (int, float))
+                                    and not isinstance(price, bool)
+                                    and math.isfinite(price)
+                                    for price in prices
+                                )
+                            ):
+                                raise ValueError("Focused line-total check returned an invalid price list.")
+
+                            corrected_total = round(sum(prices) - receipt.header_discounts, 2)
                             corrected_gap = round(
-                                corrected.total_amount - corrected_total,
+                                receipt.total_amount - corrected_total,
                                 2,
                             )
                             if abs(corrected_gap) < abs(initial_gap):
-                                receipt = corrected
+                                receipt.items = [
+                                    item.model_copy(update={"price": float(price)})
+                                    for item, price in zip(receipt.items, prices)
+                                ]
                                 logger.info(
-                                    "vision_line_items: reconciliation pass improved gap from %.2f to %.2f",
+                                    "vision_line_items: focused total check improved gap from %.2f to %.2f",
                                     initial_gap,
                                     corrected_gap,
                                 )
                             else:
                                 logger.warning(
-                                    "vision_line_items: reconciliation pass did not improve the total gap"
+                                    "vision_line_items: focused total check did not improve the total gap"
                                 )
                     except Exception:
                         logger.exception(
-                            "vision_line_items: reconciliation pass failed; keeping first parse"
+                            "vision_line_items: focused total check failed; keeping first parse"
                         )
 
                 logger.info(

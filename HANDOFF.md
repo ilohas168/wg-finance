@@ -89,6 +89,7 @@ Balance < 0 → this person owes others money.
 - **Purpose:** Preserve receipt text detail while staying below Groq's image request limit.
 - Non-tall JPEG inputs up to 6 MiB pass through unchanged. PNG and oversized inputs are converted to JPEG at quality 95 while preserving original dimensions whenever they fit the request budget.
 - Tall images are sent as three overlapping, full-width crops, each capped at 768 KiB. This gives the vision model larger receipt text while keeping the combined request compact; the prompt asks it to preserve printed names verbatim and deduplicate rows repeated in overlaps.
+- After the structured parse, a focused pass transcribes item names only. If line totals do not match the footer, a separate pass re-reads only the far-right Total values; it accepts those values only when they improve the discrepancy.
 - Other converted images are resized only as much as needed to fit the request budget. Qwen 3.8 is the primary vision model.
 
 ---
