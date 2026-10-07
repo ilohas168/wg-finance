@@ -11,13 +11,14 @@ import base64
 import io
 import json
 import logging
+import math
 import os
 import re
 from typing import Any, Dict, List, Optional, Sequence, Literal
 
 import groq
 from groq import NotFoundError
-from PIL import Image
+from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -143,40 +144,44 @@ def _strip_markdown_json(raw: str) -> str:
 # Image compression                                                            #
 # --------------------------------------------------------------------------- #
 
-_MAX_DIM = 1600   # Max width/height for Groq Vision input (avoids 413 errors)
-_JPEG_QUALITY = 85
+_MAX_INLINE_IMAGE_BYTES = 14 * 1024 * 1024
+_JPEG_QUALITY = 95
 
 
-def _compress_image(image_bytes: bytes) -> bytes:
-    """Load an image, downscale if needed, and export as a compressed JPEG.
+def _prepare_image(image_bytes: bytes) -> tuple[bytes, str]:
+    """Preserve image detail and only recompress when needed for the API limit.
 
-    This prevents the Groq ``BadRequestError`` 413 "REQUEST ENTITY TOO LARGE"
-    when roommates send high-resolution camera photos.
-
-    Parameters
-    ----------
-    image_bytes :
-        Raw bytes (PNG, JPEG, HEIC, etc.).
-
-    Returns
-    -------
-    bytes
-        Compressed JPEG bytes ready for base64 encoding.
+    PNG and JPEG inputs below the inline-image budget are passed through at
+    their original dimensions and quality. Larger or unsupported images are
+    converted to JPEG and downscaled only as much as needed.
     """
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    max_dim = max(img.size)
+    with Image.open(io.BytesIO(image_bytes)) as source:
+        image_format = (source.format or "").upper()
+        if image_format in {"JPEG", "PNG"} and len(image_bytes) <= _MAX_INLINE_IMAGE_BYTES:
+            mime_type = "image/jpeg" if image_format == "JPEG" else "image/png"
+            return image_bytes, mime_type
 
-    if max_dim <= _MAX_DIM:
-        return io.BytesIO(img.save(None, format="JPEG", quality=_JPEG_QUALITY, optimize=True).getvalue())
+        image = ImageOps.exif_transpose(source).convert("RGB")
 
-    # Downscale preserving aspect ratio
-    ratio = _MAX_DIM / max_dim
-    new_size = (int(img.width * ratio), int(img.height * ratio))
-    img = img.resize(new_size, Image.Resampling.LANCZOS)
+    quality = _JPEG_QUALITY
+    for _ in range(12):
+        out = io.BytesIO()
+        image.save(out, format="JPEG", quality=quality, optimize=True)
+        encoded = out.getvalue()
+        if len(encoded) <= _MAX_INLINE_IMAGE_BYTES:
+            return encoded, "image/jpeg"
 
-    out = io.BytesIO()
-    img.save(out, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
-    return out.getvalue()
+        max_dim = max(image.size)
+        if max_dim > 1200:
+            scale = min(0.95, math.sqrt(_MAX_INLINE_IMAGE_BYTES / len(encoded)) * 0.95)
+            new_size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
+        elif quality > 75:
+            quality -= 5
+        else:
+            break
+
+    raise ValueError("Could not reduce the receipt image below Groq's image request limit.")
 
 
 # --------------------------------------------------------------------------- #
@@ -211,11 +216,10 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
         logger.info("vision_line_items: trying model '%s'", model_name)
         client = _get_client()
 
-        # --- Image compression to avoid 413 "REQUEST ENTITY TOO LARGE" ---
-        image_bytes_compressed = _compress_image(image_bytes)
-
-        b64_image = base64.b64encode(image_bytes_compressed).decode("utf-8")
-        image_data_url = f"data:image/jpeg;base64,{b64_image}"
+        # Preserve full detail for normal photos; recompress only oversized inputs.
+        prepared_image, image_mime_type = _prepare_image(image_bytes)
+        b64_image = base64.b64encode(prepared_image).decode("utf-8")
+        image_data_url = f"data:{image_mime_type};base64,{b64_image}"
 
         for attempt in range(1, 4):
             try:

@@ -85,9 +85,10 @@ Balance < 0 → this person owes others money.
 - **IMPORTANT:** Was previously defined as parenthesized implicit string concatenation with blank lines between blocks. This caused a Python 3.13 `SyntaxError: invalid syntax` because implicit concat inside parentheses breaks when blank lines separate adjacent strings on this platform.
 - **Fix applied:** Converted to a single triple-quoted raw string (`"""..."""`) — one continuous assignment, no gaps. See commit `41f5b29`.
 
-### Vision Parser Image Compression (`_compress_image()` helper)
-- **Purpose:** Prevents Groq BadRequestError 413 "REQUEST ENTITY TOO LARGE" from large camera photos.
-- Logic: Load with PIL → convert to RGB → if max(width, height) > 1600, downscale preserving aspect ratio using `Image.Resampling.LANCZOS` → export as JPEG at quality=85 + optimize=True → return compressed bytes.
+### Vision Parser Image Preparation (`_prepare_image()` helper)
+- **Purpose:** Preserve receipt text detail while staying below Groq's image request limit.
+- PNG/JPEG inputs up to 14 MiB pass through unchanged at their original dimensions and quality.
+- Larger or unsupported images are converted to JPEG at quality 95, then resized only as much as needed to fit the request budget.
 
 ---
 
