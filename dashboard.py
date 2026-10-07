@@ -192,6 +192,18 @@ def _get_roommate_label(user: str) -> str:
     return _ROOMMATE_INITIALS.get(user, "X")
 
 
+def _beneficiary_code(value: Any) -> str:
+    """Normalize a beneficiary display label or code to A/B/C/AB/BC/AC/ALL."""
+    code = _LABEL_TO_BENEFICIARY.get(str(value), str(value))
+    return code if code in {"A", "B", "C", "AB", "BC", "AC", "ALL"} else "ALL"
+
+
+def _split_type_for_beneficiary(value: Any) -> str:
+    """Derive the legacy Shared/Private sheet field from the sole allocation."""
+    code = _beneficiary_code(value)
+    return "Shared" if code == "ALL" or len(code) > 1 else "Private"
+
+
 def _clean_df_for_sheets(df: pd.DataFrame) -> pd.DataFrame:
     """Fill NaN values for Google Sheets compatibility.
 
@@ -210,9 +222,10 @@ def _clean_df_for_sheets(df: pd.DataFrame) -> pd.DataFrame:
         df[col] = df[col].fillna(0).astype(float)
     # Convert Beneficiary display labels back to internal codes.
     if "Beneficiary" in df.columns:
-        df["Beneficiary"] = df["Beneficiary"].apply(
-            lambda v: _LABEL_TO_BENEFICIARY.get(str(v), str(v))
-        )
+        df["Beneficiary"] = df["Beneficiary"].apply(_beneficiary_code)
+        # Keep the existing Google Sheets column populated for older balance
+        # calculations, while deriving it from the single beneficiary choice.
+        df["Split_Type"] = df["Beneficiary"].apply(_split_type_for_beneficiary)
     return df
 
 
@@ -231,19 +244,22 @@ def _load_items_df(raw_dict: Optional[dict]) -> pd.DataFrame:
 
     rows = []
     for item in raw_dict.get("items", []):
-        qty = int(item.get("qty", 1))
-        price = float(item.get("price", 0.0))
-        discount = float(item.get("discount", 0.0))
-        line_total = qty * price - discount
+        qty = max(int(item.get("qty", 1)), 1)
+        line_total = float(item.get("price", 0.0))
+        # The parser reads the final receipt line total. Convert it to the
+        # editable unit-price representation without multiplying it twice.
+        unit_price = line_total / qty
+        discount = 0.0
+        beneficiary = _beneficiary_code(item.get("beneficiary", "ALL"))
         rows.append({
             "Product_Name": item.get("name", ""),
             "Category": item.get("category", "General"),
             "Qty": qty,
-            "Unit_Price": price,
+            "Unit_Price": unit_price,
             "Discount": discount,
             "Line_Total": line_total,
-            "Split_Type": item.get("split_type", "Shared"),
-            "Beneficiary": item.get("beneficiary", "ALL"),
+            "Split_Type": _split_type_for_beneficiary(beneficiary),
+            "Beneficiary": beneficiary,
         })
     df = pd.DataFrame(rows)
     for col in ["Qty", "Unit_Price", "Discount", "Line_Total"]:
@@ -259,23 +275,24 @@ def _summarise_receipt(df: pd.DataFrame, header_discounts: float) -> Dict[str, f
             "shared_total": 0.0,
             "per_roommate_share": 0.0,
             "personal_total": 0.0,
-            "grand_total": header_discounts,
+            "grand_total": -header_discounts,
         }
 
-    shared_mask = df["Split_Type"] == "Shared"
-    private_mask = df["Split_Type"] == "Private"
+    beneficiary_codes = df["Beneficiary"].apply(_beneficiary_code)
+    shared_mask = beneficiary_codes.apply(lambda code: code == "ALL" or len(code) > 1)
+    private_mask = ~shared_mask
 
     shared_total = float(df.loc[shared_mask, "Line_Total"].sum()) if shared_mask.any() else 0.0
     personal_total = float(df.loc[private_mask, "Line_Total"].sum()) if private_mask.any() else 0.0
-    grand_total = round(shared_total + abs(personal_total) + header_discounts, 2)
+    grand_total = round(float(df["Line_Total"].sum()) - header_discounts, 2)
 
     # Per-roommate share of shared pool: divide by number of beneficiaries
     per_roommate_share = round(shared_total / 3.0, 2)
 
     return {
-        "shared_total": round(abs(shared_total), 2),
-        "per_roommate_share": abs(per_roommate_share),
-        "personal_total": round(abs(personal_total), 2),
+        "shared_total": round(shared_total, 2),
+        "per_roommate_share": per_roommate_share,
+        "personal_total": round(personal_total, 2),
         "grand_total": grand_total,
     }
 
@@ -309,6 +326,8 @@ if selected_tab == "Upload Receipt":
             raw_dict = parse_itemized_receipt(image_bytes)
             st.session_state.parsed_dict = raw_dict.model_dump()
             st.session_state.raw_items_df = _load_items_df(raw_dict.model_dump())
+            st.session_state.receipt_total_input = float(raw_dict.total_amount)
+            st.session_state.header_discounts_input = float(raw_dict.header_discounts)
             st.session_state.has_parsed = True
             st.info(f"Parsed receipt from **{raw_dict.merchant}** on **{raw_dict.date}** — {len(raw_dict.items)} items.")
         except Exception as exc:
@@ -340,11 +359,7 @@ if selected_tab == "Upload Receipt":
             "Qty": st.column_config.NumberColumn("Qty", min_value=0, step=1, width="small"),
             "Unit_Price": st.column_config.NumberColumn("Unit Price", format="%.2f", width="small"),
             "Discount": st.column_config.NumberColumn("Discount", format="%.2f", width="small"),
-            "Split_Type": st.column_config.SelectboxColumn(
-                "Split",
-                options=["Shared", "Private"],
-                width="small",
-            ),
+            "Line_Total": st.column_config.NumberColumn("Line Total", format="%.2f", disabled=True, width="small"),
             "Beneficiary": st.column_config.SelectboxColumn(
                 "Who pays for this item",
                 options=_ben_options,
@@ -366,11 +381,25 @@ if selected_tab == "Upload Receipt":
             if col in edited_df.columns:
                 edited_df[col] = pd.to_numeric(edited_df[col], errors="coerce").fillna(0)
         edited_df["Line_Total"] = _compute_line_totals(edited_df)
+        edited_df["Split_Type"] = edited_df["Beneficiary"].apply(_split_type_for_beneficiary)
         st.session_state.raw_items_df = edited_df
 
         # Summary metrics.
-        header_disc = st.number_input("Header discounts", value=0.0, key="header_discounts_input")
+        if "header_discounts_input" not in st.session_state:
+            st.session_state.header_discounts_input = float(
+                st.session_state.parsed_dict.get("header_discounts", 0.0)
+            )
+        header_disc = st.number_input(
+            "Header discounts (CHF; subtract from items total)",
+            min_value=0.0,
+            step=0.01,
+            format="%.2f",
+            key="header_discounts_input",
+        )
         summary = _summarise_receipt(edited_df, header_disc)
+        parsed_total = float(st.session_state.parsed_dict.get("total_amount", 0.0)) if st.session_state.parsed_dict else 0.0
+        if "receipt_total_input" not in st.session_state:
+            st.session_state.receipt_total_input = parsed_total or summary["grand_total"]
         m1, m2, m3, m4 = st.columns(4)
         with m1:
             st.metric("Shared Total", f"CHF {summary['shared_total']:,.2f}")
@@ -379,26 +408,32 @@ if selected_tab == "Upload Receipt":
         with m3:
             st.metric("Personal Total", f"CHF {summary['personal_total']:,.2f}")
         with m4:
-            st.metric("Grand Total", f"CHF {summary['grand_total']:,.2f}")
+            receipt_total = st.number_input(
+                "Grand total on receipt (CHF)",
+                min_value=0.0,
+                step=0.01,
+                format="%.2f",
+                key="receipt_total_input",
+            )
 
         # Grand total validation — compare line items sum vs receipt total.
-        parsed_total = st.session_state.parsed_dict.get("total_amount", 0.0) if st.session_state.parsed_dict else 0.0
         computed_sum = float(edited_df["Line_Total"].sum())
-        discrepancy = abs(computed_sum - parsed_total)
+        amount_from_items = computed_sum - header_disc
+        discrepancy = abs(amount_from_items - receipt_total)
 
         st.divider()
         st.subheader("Validation")
-        if parsed_total and discrepancy > 0.1:
+        if discrepancy > 0.1:
             st.warning(
-                f"Items total (CHF {computed_sum:,.2f}) differs from "
-                f"receipt total (CHF {parsed_total:,.2f}). "
+                f"Items total after header discounts (CHF {amount_from_items:,.2f}) differs from "
+                f"receipt total (CHF {receipt_total:,.2f}). "
                 f"Discrepancy: CHF {discrepancy:,.2f}. "
-                f"Please adjust items before saving."
+                f"Check the item rows or correct the editable receipt total."
             )
         else:
             st.info(
-                f"Items total (CHF {computed_sum:,.2f}) matches receipt total "
-                f"(CHF {parsed_total:,.2f}). ✓"
+                f"Items total after header discounts (CHF {amount_from_items:,.2f}) matches receipt total "
+                f"(CHF {receipt_total:,.2f}). ✓"
             )
 
         # Save.
@@ -425,7 +460,7 @@ if selected_tab == "Upload Receipt":
                         "Store": st.session_state.parsed_dict.get("merchant", ""),
                         "Paid_By": _payer,
                         "Header_Discounts": header_disc,
-                        "Grand_Total": summary["grand_total"],
+                        "Grand_Total": receipt_total,
                         "Shared_Total": summary["shared_total"],
                         "Notes": "",
                     }
@@ -490,11 +525,7 @@ elif selected_tab == "Edit History":
                         "Qty": st.column_config.NumberColumn("Qty", min_value=0, step=1, width="small"),
                         "Unit_Price": st.column_config.NumberColumn("Unit Price", format="%.2f", width="small"),
                         "Discount": st.column_config.NumberColumn("Discount", format="%.2f", width="small"),
-                        "Split_Type": st.column_config.SelectboxColumn(
-                            "Split",
-                            options=["Shared", "Private"],
-                            width="small",
-                        ),
+                        "Line_Total": st.column_config.NumberColumn("Line Total", format="%.2f", disabled=True, width="small"),
                         "Beneficiary": st.column_config.SelectboxColumn(
                             "Who pays for this item",
                             options=_ben_options,
@@ -515,6 +546,7 @@ elif selected_tab == "Edit History":
                         if col in edited_df.columns:
                             edited_df[col] = pd.to_numeric(edited_df[col], errors="coerce").fillna(0)
                     edited_df["Line_Total"] = _compute_line_totals(edited_df)
+                    edited_df["Split_Type"] = edited_df["Beneficiary"].apply(_split_type_for_beneficiary)
 
                     col_update, _ = st.columns([1, 5])
                     with col_update:

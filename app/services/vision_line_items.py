@@ -33,8 +33,8 @@ class LineItem(BaseModel):
     name: str = Field(description="Descriptive item name.")
     price: float = Field(
         description=(
-            "Price of this line-item. Positive for regular charges; negative for "
-            "discounts, deductions, vouchers (e.g. -3.60 for Rabatt/Pfand)."
+            "Final line total printed on the receipt, after any line discount. "
+            "Positive for charges; negative for separate discount/refund lines."
         ),
     )
     qty: int = Field(default=1, description="Quantity of the item.")
@@ -42,9 +42,14 @@ class LineItem(BaseModel):
         default="General",
         description="Category tag: Food, Drink, Toiletries, Household, General — never null or empty.",
     )
-    discount: float = Field(default=0.0, description="Line-level discount amount. Use negative for discounts.")
-    split_type: Literal["Shared", "Private"] = Field(default="Shared", description="Whether this item is Shared among roommates or Private to specific ones.")
-    beneficiary: str = Field(default="ALL", description="Which roommates benefit: 'A','B','C','AB','BC','AC','ALL'")
+    discount: float = Field(
+        default=0.0,
+        description="Separate discount only when it is not already reflected in price.",
+    )
+    beneficiary: Literal["A", "B", "C", "AB", "BC", "AC", "ALL"] = Field(
+        default="ALL",
+        description="Who shares this item's cost: A, B, C, AB, BC, AC, or ALL.",
+    )
 
 
 class ItemizedReceipt(BaseModel):
@@ -71,53 +76,40 @@ _VISION_MODEL_CANDIDATES: list[str] = [
     "qwen/qwen3.8-27b",
 ]
 
-_SYSTEM_PROMPT: str = """You are a receipt parsing assistant for a 3-person sharehouse.\n
-Extract every line-item from this receipt image into structured JSON.\n\n
-**You MUST output valid, parseable JSON only — no markdown fences,**\n
-**explanations, or text outside the JSON object.**\n\n
+_SYSTEM_PROMPT: str = """You extract receipts into JSON for a 3-person sharehouse.
+Return valid JSON only, with no markdown or extra text.
 
---- Swiss Receipt Rules (Coop / Migros / Aldi / Lidl etc.) ---\n
-Swiss receipts use a column layout:\n
-  `Artikel` (Name) | `Menge` (Qty/Weight) | `Preis` (Unit Price) | `Aktion` (Discount) | `Total` (Line Total)\n\n
-- ALWAYS use the **rightmost `Total`** column as the line item `price`.\n
-- For decimal weights in `Menge` (e.g. `0.420 kg`), set `qty = 1` and `price = Total`.\n
---- Split Fields ---\n
-- Each item MUST have `split_type`: either \"Shared\" (cost shared among roommates) or \"Private\" (specific roommate only).\n
-- Default `split_type` is "Shared".\n
-- Each item MUST have `beneficiary`: which roommates benefit — one of \"A\",\"B\",\"C\",\"AB\",\"BC\",\"AC\",\"ALL\".\n
-- Default `beneficiary` is "ALL".\n
-- Line_Total calculation: `(Qty × Unit_Price) − Discount`. The Vision parser should output the line total separately from unit price.\n
+Read the receipt carefully, especially the final amount at the bottom:
+- total_amount MUST be copied exactly from the printed grand total / amount paid.
+  It is the source of truth. Never calculate or guess it from the item rows.
+- Receipt item prices are normally tax-inclusive. Do not add a VAT/tax breakdown
+  to total_amount a second time.
+- Include every charge and discount exactly once. Use the rightmost Total
+  column as each item's final price; it already includes the quantity and any
+  line discount. Keep the printed qty as informational quantity, but do not
+  multiply the line total when deciding price.
+- Use a negative price for a separate discount/refund row (including Swiss
+  trailing-minus values such as 3.60-). Set discount to 0 when the printed line
+  total already includes that discount.
+- header_discounts is a positive amount for a receipt-wide discount that is
+  not already included in item prices. Use 0 when absent.
+- beneficiary is the only per-item allocation field: one of A, B, C, AB, BC,
+  AC, or ALL. Default to ALL. Do not output a separate Shared/Private field.
+- category must be one of Food, Drink, Toiletries, Household, General.
+- date must use YYYY-MM-DD; infer only when it is not printed.
 
-- Swiss trailing minus signs indicate negatives: `"3.60-"` → `-3.60`.\n
-- Items like `Rabatt`, `Aktion`, `Sonderpreis` are **discounts** — their price MUST be negative (e.g. `-3.60`).\n
-- Always assign every item a non-empty `category`: one of `Food`, `Drink`, `Toiletries`, `Household`, `General`.\n
-
-Each item must have:\n
-  - "name": short descriptive name (<=60 chars)\n
-  - "price": number — positive for regular charges; negative for discounts,\n
-                deductions, and vouchers (e.g. -3.60 for Rabatt/Pfand)\n
-  - "qty": integer quantity (default 1 when not visible)\n
-  - "category": one of Food, Drink, Toiletries, Household, General — NEVER null or empty.\n
-  - "discount": line-level discount amount (0.0 when none). For Rabatt/Aktion lines this should be positive (e.g. 1.20).\n
-  - "split_type": "Shared" or "Private" — default "Shared".\n
-  - "beneficiary": one of "A","B","C","AB","BC","AC","ALL" — default "ALL".\n\n
-Receipt-level fields:\n
-- `header_discounts`: receipt-wide subtotal discount (default 0.0).\n\n
-Rules:\n
-  - date must be YYYY-MM-DD (guess from visual cues if absent).\n
-  - tax_total is the total tax line (0 if not listed).\n\n
-JSON structure:\n
-{\n
-  "merchant": "store name",\n
-  "date": "2026-10-03",\n
-  "total_amount": 14.74,\n
-  "header_discounts": 0.0,\n
-  "items": [\n
-    {"name": "Milk", "price": 3.50, "qty": 2, "category": "Drink", "discount": 0.0, "split_type": "Shared", "beneficiary": "ALL"},\n
-    {"name": "Rabatt", "price": -1.20, "qty": 1, "category": "General", "discount": 1.20, "split_type": "Shared", "beneficiary": "ALL"}\n
-  ]\n
-}\n"""
-
+JSON shape:
+{
+  "merchant": "store name",
+  "date": "2026-10-03",
+  "total_amount": 14.74,
+  "header_discounts": 0.0,
+  "items": [
+    {"name": "Milk", "price": 3.50, "qty": 2, "category": "Drink", "discount": 0.0, "beneficiary": "ALL"},
+    {"name": "Rabatt", "price": -1.20, "qty": 1, "category": "General", "discount": 0.0, "beneficiary": "ALL"}
+  ]
+}
+"""
 
 
 def _get_client() -> groq.Groq:
