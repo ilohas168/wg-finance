@@ -506,13 +506,21 @@ if selected_tab == "Upload Receipt":
         )
 
         st.subheader("Line-items")
+        st.caption(
+            "Click a cell to edit it. Line Total is calculated from Qty, Unit Price, and Discount."
+        )
         # Display labels for the Beneficiary column.
         _ben_options = list(_BENEFICIARY_LABELS.values())  # e.g. ["All (Shin…)", "Shin", ...]
 
+        if "Category" in df.columns:
+            valid_categories = {"Food", "Drink", "Toiletries", "Household", "General"}
+            df["Category"] = df["Category"].fillna("").astype(str).apply(
+                lambda value: value if value in valid_categories else "General"
+            )
         # Convert internal codes → display labels for the editor.
         if "Beneficiary" in df.columns:
             df["Beneficiary"] = df["Beneficiary"].apply(
-                lambda v: _BENEFICIARY_LABELS.get(str(v), str(v))
+                lambda value: _BENEFICIARY_LABELS[_beneficiary_code(value)]
             )
 
         col_config = {
@@ -525,7 +533,7 @@ if selected_tab == "Upload Receipt":
             "Qty": st.column_config.NumberColumn("Qty", min_value=0.0, step=0.001, format="%.3f", width="small"),
             "Unit_Price": st.column_config.NumberColumn("Unit Price", format="%.2f", width="small"),
             "Discount": st.column_config.NumberColumn("Discount", format="%.2f", width="small"),
-            "Line_Total": st.column_config.NumberColumn("Line Total", format="%.2f", disabled=True, width="small"),
+            "Line_Total": st.column_config.NumberColumn("Line Total", format="%.2f", width="small"),
             "Beneficiary": st.column_config.SelectboxColumn(
                 "Who pays for this item",
                 options=_ben_options,
@@ -539,6 +547,7 @@ if selected_tab == "Upload Receipt":
             column_order=list(col_config.keys()),
             hide_index=True,
             use_container_width=True,
+            disabled=["Line_Total"],
             key="items_editor",
         )
 
@@ -810,14 +819,25 @@ elif selected_tab == "Past Receipts":
                     # Recover them from the saved line total and unit price so
                     # opening/editing a past receipt does not change its value.
                     df_items = recover_legacy_weighted_quantities(df_items)
+                    df_items = df_items.reset_index(drop=True)
+                    if "Product_Name" in df_items.columns:
+                        df_items["Product_Name"] = df_items["Product_Name"].fillna("").astype(str)
+                    if "Category" in df_items.columns:
+                        valid_categories = {"Food", "Drink", "Toiletries", "Household", "General"}
+                        df_items["Category"] = df_items["Category"].fillna("").astype(str).apply(
+                            lambda value: value if value in valid_categories else "General"
+                        )
                     df_items["Line_Total"] = _compute_line_totals(df_items)
 
                     st.subheader("Line-items")
+                    st.caption(
+                        "Click a cell to edit it. Line Total is calculated from Qty, Unit Price, and Discount."
+                    )
                     _ben_options = list(_BENEFICIARY_LABELS.values())
 
                     # Convert internal codes → display labels for the editor.
                     df_items["Beneficiary"] = df_items["Beneficiary"].apply(
-                        lambda v: _BENEFICIARY_LABELS.get(str(v), str(v))
+                        lambda value: _BENEFICIARY_LABELS[_beneficiary_code(value)]
                     )
 
                     col_config = {
@@ -830,7 +850,7 @@ elif selected_tab == "Past Receipts":
                         "Qty": st.column_config.NumberColumn("Qty", min_value=0.0, step=0.001, format="%.3f", width="small"),
                         "Unit_Price": st.column_config.NumberColumn("Unit Price", format="%.2f", width="small"),
                         "Discount": st.column_config.NumberColumn("Discount", format="%.2f", width="small"),
-                        "Line_Total": st.column_config.NumberColumn("Line Total", format="%.2f", disabled=True, width="small"),
+                        "Line_Total": st.column_config.NumberColumn("Line Total", format="%.2f", width="small"),
                         "Beneficiary": st.column_config.SelectboxColumn(
                             "Who pays for this item",
                             options=_ben_options,
@@ -843,7 +863,8 @@ elif selected_tab == "Past Receipts":
                         column_order=list(col_config.keys()),
                         hide_index=True,
                         use_container_width=True,
-                        key="edit_history_editor",
+                        disabled=["Line_Total"],
+                        key=f"edit_history_editor_{selected_rid}",
                     )
 
                     # Compute Line_Total after edit.
