@@ -3,6 +3,37 @@
 from decimal import Decimal, ROUND_FLOOR
 from typing import Mapping
 
+import pandas as pd
+
+
+def recover_legacy_weighted_quantities(items: pd.DataFrame) -> pd.DataFrame:
+    """Restore fractional quantities from saved line totals where possible."""
+    result = items.copy()
+    numeric_columns = ("Qty", "Unit_Price", "Discount", "Line_Total")
+    for column in numeric_columns:
+        if column in result.columns:
+            result[column] = pd.to_numeric(
+                result[column], errors="coerce"
+            ).fillna(0)
+
+    required = {"Qty", "Unit_Price", "Discount", "Line_Total"}
+    if not required.issubset(result.columns):
+        return result
+
+    # Sheets often returns Qty as int64 when every stored value is whole. Cast
+    # before restoring fractions so pandas can accept weighted quantities.
+    result["Qty"] = result["Qty"].astype(float)
+    inferred_qty = (result["Line_Total"] + result["Discount"]) / result[
+        "Unit_Price"
+    ].replace(0, float("nan"))
+    formula_total = result["Qty"] * result["Unit_Price"] - result["Discount"]
+    recover_qty = (
+        (result["Unit_Price"] > 0)
+        & (inferred_qty > 0)
+        & ((formula_total - result["Line_Total"]).abs() > 0.01)
+    )
+    result.loc[recover_qty, "Qty"] = inferred_qty.loc[recover_qty].astype(float)
+    return result
 
 def round_shares_to_cents(
     exact_shares: Mapping[str, Decimal], total_cents: int

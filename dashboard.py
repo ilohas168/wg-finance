@@ -18,7 +18,10 @@ from typing import Any, Dict, List, Optional
 
 import streamlit as st
 import pandas as pd
-from app.services.accounting import round_shares_to_cents
+from app.services.accounting import (
+    recover_legacy_weighted_quantities,
+    round_shares_to_cents,
+)
 
 # --------------------------------------------------------------------------- #
 # Page config                                                                  #
@@ -738,25 +741,10 @@ elif selected_tab == "Past Receipts":
                     )
 
                 if not df_items.empty:
-                    for col in ["Qty", "Unit_Price", "Discount", "Line_Total"]:
-                        if col in df_items.columns:
-                            df_items[col] = pd.to_numeric(df_items[col], errors="coerce").fillna(0)
                     # Older saves truncated weighed-item quantities to integers.
                     # Recover them from the saved line total and unit price so
                     # opening/editing a past receipt does not change its value.
-                    if {"Qty", "Unit_Price", "Discount", "Line_Total"}.issubset(df_items.columns):
-                        inferred_qty = (
-                            df_items["Line_Total"] + df_items["Discount"]
-                        ) / df_items["Unit_Price"].replace(0, float("nan"))
-                        formula_total = (
-                            df_items["Qty"] * df_items["Unit_Price"] - df_items["Discount"]
-                        )
-                        recover_qty = (
-                            (df_items["Unit_Price"] > 0)
-                            & (inferred_qty > 0)
-                            & ((formula_total - df_items["Line_Total"]).abs() > 0.01)
-                        )
-                        df_items.loc[recover_qty, "Qty"] = inferred_qty.loc[recover_qty]
+                    df_items = recover_legacy_weighted_quantities(df_items)
                     df_items["Line_Total"] = _compute_line_totals(df_items)
 
                     st.subheader("Line-items")

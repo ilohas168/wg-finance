@@ -2,7 +2,13 @@
 
 from decimal import Decimal
 
-from app.services.accounting import round_shares_to_cents
+import pandas as pd
+import pytest
+
+from app.services.accounting import (
+    recover_legacy_weighted_quantities,
+    round_shares_to_cents,
+)
 
 
 def test_rounding_preserves_receipt_total_without_row_bias():
@@ -30,3 +36,19 @@ def test_cumulative_rounding_avoids_one_cent_per_receipt_bias():
 
     assert shares == {"A": 7114, "B": 7113, "C": 7113}
     assert sum(shares.values()) == 5335 * 4
+
+
+def test_legacy_integer_qty_column_accepts_recovered_fractional_quantities():
+    items = pd.DataFrame(
+        {
+            "Qty": pd.Series([0, 1], dtype="int64"),
+            "Unit_Price": [13.21, 1.19],
+            "Discount": [0, 0],
+            "Line_Total": [5.55, 1.45],
+        }
+    )
+
+    recovered = recover_legacy_weighted_quantities(items)
+
+    assert recovered["Qty"].dtype.kind == "f"
+    assert recovered["Qty"].tolist() == pytest.approx([5.55 / 13.21, 1.45 / 1.19])
