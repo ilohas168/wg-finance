@@ -729,8 +729,26 @@ elif selected_tab == "Past Receipts":
                     "Review those line items in Past Receipts before relying on its split."
                 )
 
+        receipt_dates = (
+            parse_receipt_dates(df_receipts["Date"])
+            if "Date" in df_receipts.columns
+            else pd.Series(pd.NaT, index=df_receipts.index)
+        )
+        receipt_labels = {}
+        for (_, receipt), parsed_date in zip(df_receipts.iterrows(), receipt_dates):
+            receipt_id = str(receipt.get("Receipt_ID", "")).strip()
+            if not receipt_id:
+                continue
+            date_label = parsed_date.strftime("%d.%m.%Y") if pd.notna(parsed_date) else "Date unknown"
+            receipt_labels[receipt_id] = f"{date_label} · {receipt_id}"
+
         receipt_ids = [str(r) for r in df_receipts["Receipt_ID"].tolist()]
-        selected_rid = st.selectbox("Select Receipt", options=receipt_ids, key="edit_receipt_select")
+        selected_rid = st.selectbox(
+            "Select Receipt",
+            options=receipt_ids,
+            format_func=lambda receipt_id: receipt_labels.get(receipt_id, receipt_id),
+            key="edit_receipt_select",
+        )
 
         if selected_rid:
             try:
