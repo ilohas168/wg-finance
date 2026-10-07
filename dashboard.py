@@ -1028,7 +1028,15 @@ elif selected_tab == "Parent Reports":
             df_roommate = df_filtered
 
         # Show total metric
-        st.metric("Total Spent by Selected Roommate", f"CHF {df_roommate['Grand_Total'].sum():,.2f}" if "Grand_Total" in df_roommate.columns else "CHF 0.00")
+        total_spent_cents = (
+            sum(_money_to_cents(value) for value in df_roommate["Grand_Total"])
+            if "Grand_Total" in df_roommate.columns
+            else 0
+        )
+        st.metric(
+            "Total Spent by Selected Roommate",
+            f"CHF {total_spent_cents / 100:,.2f}",
+        )
 
         st.divider()
 
