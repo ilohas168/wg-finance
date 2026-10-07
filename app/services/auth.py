@@ -56,7 +56,7 @@ def _ensure_users_sheet() -> None:
             ws = client.add_worksheet(
                 title="Users", rows=50, cols=4,
             )
-            ws.insert_row(["Username", "PasswordHash", "Name"], idx=1)
+            ws.insert_row(["Username", "PasswordHash", "Name"], index=1)
         except Exception:
             logger.warning("Could not create Users worksheet.")
             return
@@ -73,7 +73,7 @@ def _ensure_users_sheet() -> None:
     # _ensure_users_sheet adds when it creates the worksheet itself.
     if not values or not any(str(cell).strip() for cell in values[0]):
         try:
-            ws.insert_row(headers, idx=1)
+            ws.insert_row(headers, index=1)
             values = [headers]
         except Exception:
             logger.warning("Could not add headers to Users worksheet.")
@@ -87,7 +87,7 @@ def _ensure_users_sheet() -> None:
         and "username" not in [str(cell).strip().lower() for cell in values[0]]
     ):
         try:
-            ws.insert_row(headers, idx=1)
+            ws.insert_row(headers, index=1)
             values.insert(0, headers)
         except Exception:
             logger.warning("Could not repair missing headers in Users worksheet.")

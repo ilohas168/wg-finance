@@ -322,7 +322,7 @@ def _ensure_all_worksheets() -> dict[str, gspread.Worksheet]:
                 cols=len(headers) + 5  # Adding buffer columns
             )
             worksheet.clear()  # remove the empty default row added by add_worksheet
-            worksheet.insert_row(headers, idx=1)
+            worksheet.insert_row(headers, index=1)
             logger.info(f"Created new '{sheet_name}' worksheet with headers.")
         else:
             worksheet = spreadsheet.worksheet(sheet_name)
