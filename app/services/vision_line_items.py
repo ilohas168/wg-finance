@@ -37,7 +37,11 @@ class LineItem(BaseModel):
             "Positive for charges; negative for separate discount/refund lines."
         ),
     )
-    qty: int = Field(default=1, description="Quantity of the item.")
+    qty: float = Field(
+        default=1.0,
+        gt=0,
+        description="Quantity of the item; may be fractional for weighed goods, such as 0.42 kg.",
+    )
     category: str = Field(
         default="General",
         description="Category tag: Food, Drink, Toiletries, Household, General — never null or empty.",
@@ -86,8 +90,9 @@ Read the receipt carefully, especially the final amount at the bottom:
   to total_amount a second time.
 - Include every charge and discount exactly once. Use the rightmost Total
   column as each item's final price; it already includes the quantity and any
-  line discount. Keep the printed qty as informational quantity, but do not
-  multiply the line total when deciding price.
+  line discount. Keep the printed qty as informational quantity, including
+  fractional weights such as 0.42 kg; do not round it or multiply the line
+  total when deciding price.
 - Use a negative price for a separate discount/refund row (including Swiss
   trailing-minus values such as 3.60-). Set discount to 0 when the printed line
   total already includes that discount.

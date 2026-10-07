@@ -244,7 +244,7 @@ def _load_items_df(raw_dict: Optional[dict]) -> pd.DataFrame:
 
     rows = []
     for item in raw_dict.get("items", []):
-        qty = max(int(item.get("qty", 1)), 1)
+        qty = max(float(item.get("qty", 1) or 1), 0.001)
         line_total = float(item.get("price", 0.0))
         # The parser reads the final receipt line total. Convert it to the
         # editable unit-price representation without multiplying it twice.
@@ -356,7 +356,7 @@ if selected_tab == "Upload Receipt":
                 options=["Food", "Drink", "Toiletries", "Household", "General"],
                 width="small",
             ),
-            "Qty": st.column_config.NumberColumn("Qty", min_value=0, step=1, width="small"),
+            "Qty": st.column_config.NumberColumn("Qty", min_value=0.0, step=0.001, format="%.3f", width="small"),
             "Unit_Price": st.column_config.NumberColumn("Unit Price", format="%.2f", width="small"),
             "Discount": st.column_config.NumberColumn("Discount", format="%.2f", width="small"),
             "Line_Total": st.column_config.NumberColumn("Line Total", format="%.2f", disabled=True, width="small"),
@@ -522,7 +522,7 @@ elif selected_tab == "Edit History":
                             options=["Food", "Drink", "Toiletries", "Household", "General"],
                             width="small",
                         ),
-                        "Qty": st.column_config.NumberColumn("Qty", min_value=0, step=1, width="small"),
+                        "Qty": st.column_config.NumberColumn("Qty", min_value=0.0, step=0.001, format="%.3f", width="small"),
                         "Unit_Price": st.column_config.NumberColumn("Unit Price", format="%.2f", width="small"),
                         "Discount": st.column_config.NumberColumn("Discount", format="%.2f", width="small"),
                         "Line_Total": st.column_config.NumberColumn("Line Total", format="%.2f", disabled=True, width="small"),
