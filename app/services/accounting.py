@@ -1,9 +1,52 @@
 """Exact currency allocation helpers for the sharehouse ledger."""
 
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Mapping
 
 import pandas as pd
+
+
+def resolve_line_item_amounts(
+    original_quantity: float,
+    original_unit_price: float,
+    original_discount: float,
+    original_line_total: float,
+    quantity: float,
+    unit_price: float,
+    discount: float,
+    line_total: float,
+) -> tuple[float, float]:
+    """Resolve edited amount fields, giving a changed Line Total precedence.
+
+    If Line Total was left alone, edits to quantity, unit price, or discount
+    recalculate it. If Line Total changed, adjust unit price to keep the fields
+    consistent. With no amount edits, preserve the stored total as-is.
+    """
+    def to_cents(value: float) -> int:
+        return int(
+            (Decimal(str(value)) * 100).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        )
+    amount_fields_changed = any(
+        abs(new_value - old_value) > 0.000001
+        for new_value, old_value in (
+            (quantity, original_quantity),
+            (unit_price, original_unit_price),
+            (discount, original_discount),
+        )
+    )
+
+    if to_cents(line_total) != to_cents(original_line_total):
+        resolved_total = float(line_total)
+        if quantity > 0:
+            unit_price = (resolved_total + discount) / quantity
+    elif amount_fields_changed:
+        resolved_total = quantity * unit_price - discount
+    else:
+        resolved_total = original_line_total
+
+    return float(resolved_total), float(unit_price)
 
 
 def recover_legacy_weighted_quantities(items: pd.DataFrame) -> pd.DataFrame:

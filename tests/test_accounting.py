@@ -7,6 +7,7 @@ import pytest
 
 from app.services.accounting import (
     recover_legacy_weighted_quantities,
+    resolve_line_item_amounts,
     round_shares_to_cents,
 )
 
@@ -52,3 +53,33 @@ def test_legacy_integer_qty_column_accepts_recovered_fractional_quantities():
 
     assert recovered["Qty"].dtype.kind == "f"
     assert recovered["Qty"].tolist() == pytest.approx([5.55 / 13.21, 1.45 / 1.19])
+
+
+def test_manual_line_total_drives_allocation_and_keeps_unit_price_consistent():
+    total, unit_price = resolve_line_item_amounts(
+        0.42, 13.21, 0.0, 5.55,
+        0.42, 13.21, 0.0, 5.50,
+    )
+
+    assert total == pytest.approx(5.50)
+    assert unit_price == pytest.approx(5.50 / 0.42)
+
+
+def test_quantity_price_or_discount_edit_recalculates_line_total():
+    total, unit_price = resolve_line_item_amounts(
+        1.0, 5.0, 0.0, 5.0,
+        2.0, 3.0, 0.5, 5.0,
+    )
+
+    assert total == pytest.approx(5.5)
+    assert unit_price == pytest.approx(3.0)
+
+
+def test_non_amount_edit_preserves_existing_line_total():
+    total, unit_price = resolve_line_item_amounts(
+        1.0, 5.0, 0.0, 5.25,
+        1.0, 5.0, 0.0, 5.25,
+    )
+
+    assert total == pytest.approx(5.25)
+    assert unit_price == pytest.approx(5.0)

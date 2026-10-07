@@ -22,6 +22,7 @@ import streamlit as st
 import pandas as pd
 from app.services.accounting import (
     recover_legacy_weighted_quantities,
+    resolve_line_item_amounts,
     round_shares_to_cents,
 )
 from app.services.reporting import filter_receipts_for_period, parse_receipt_dates
@@ -387,7 +388,31 @@ def _compute_line_totals(df: pd.DataFrame) -> pd.Series:
 
 def _prepare_receipt_items_for_editing(items: pd.DataFrame) -> pd.DataFrame:
     """Normalize saved line items for the Past Receipts editor and calculations."""
-    result = recover_legacy_weighted_quantities(items).reset_index(drop=True)
+    source = items.copy()
+    if "Line_Total" in source.columns:
+        qty = pd.to_numeric(
+            source["Qty"] if "Qty" in source.columns else pd.Series(1, index=source.index),
+            errors="coerce",
+        ).fillna(1)
+        unit_price = pd.to_numeric(
+            source["Unit_Price"]
+            if "Unit_Price" in source.columns
+            else pd.Series(0, index=source.index),
+            errors="coerce",
+        ).fillna(0)
+        discount = pd.to_numeric(
+            source["Discount"]
+            if "Discount" in source.columns
+            else pd.Series(0, index=source.index),
+            errors="coerce",
+        ).fillna(0)
+        calculated_total = qty * unit_price - discount
+        saved_total = pd.to_numeric(source["Line_Total"], errors="coerce")
+        source["Line_Total"] = saved_total.where(
+            saved_total.notna(), calculated_total
+        )
+
+    result = recover_legacy_weighted_quantities(source).reset_index(drop=True)
     if "Product_Name" in result.columns:
         result["Product_Name"] = result["Product_Name"].fillna("").astype(str)
     if "Category" in result.columns:
@@ -399,7 +424,8 @@ def _prepare_receipt_items_for_editing(items: pd.DataFrame) -> pd.DataFrame:
         result["Beneficiary"] = result["Beneficiary"].apply(
             lambda value: _BENEFICIARY_LABELS[_beneficiary_code(value)]
         )
-    result["Line_Total"] = _compute_line_totals(result)
+    if "Line_Total" not in result.columns:
+        result["Line_Total"] = _compute_line_totals(result)
     return result
 
 
@@ -467,12 +493,12 @@ def _edit_one_line_item(
                 key=f"{key_prefix}_beneficiary_{selected_index}",
             )
 
-        value_cols = st.columns(3)
+        value_cols = st.columns(4)
         with value_cols[0]:
             quantity = st.number_input(
                 "Qty",
-                min_value=0.0,
-                value=number_value("Qty", 1.0),
+                min_value=0.001,
+                value=max(0.001, number_value("Qty", 1.0)),
                 step=0.001,
                 format="%.3f",
                 key=f"{key_prefix}_qty_{selected_index}",
@@ -493,18 +519,48 @@ def _edit_one_line_item(
                 format="%.2f",
                 key=f"{key_prefix}_discount_{selected_index}",
             )
+        with value_cols[3]:
+            line_total = st.number_input(
+                "Line Total (CHF)",
+                value=number_value(
+                    "Line_Total",
+                    number_value("Qty", 1.0) * number_value("Unit_Price", 0.0)
+                    - number_value("Discount", 0.0),
+                ),
+                step=0.01,
+                format="%.2f",
+                key=f"{key_prefix}_line_total_{selected_index}",
+            )
 
         apply_clicked = st.form_submit_button("Apply item changes")
 
     updated = items.copy()
     if apply_clicked:
+        original_quantity = number_value("Qty", 1.0)
+        original_unit_price = number_value("Unit_Price", 0.0)
+        original_discount = number_value("Discount", 0.0)
+        original_line_total = number_value(
+            "Line_Total",
+            original_quantity * original_unit_price - original_discount,
+        )
+        resolved_line_total, resolved_unit_price = resolve_line_item_amounts(
+            original_quantity,
+            original_unit_price,
+            original_discount,
+            original_line_total,
+            float(quantity),
+            float(unit_price),
+            float(discount),
+            float(line_total),
+        )
+
         updated.at[selected_index, "Product_Name"] = item_name
         updated.at[selected_index, "Category"] = category
         updated.at[selected_index, "Qty"] = float(quantity)
-        updated.at[selected_index, "Unit_Price"] = float(unit_price)
+        updated.at[selected_index, "Unit_Price"] = resolved_unit_price
         updated.at[selected_index, "Discount"] = float(discount)
+        updated.at[selected_index, "Line_Total"] = resolved_line_total
         updated.at[selected_index, "Beneficiary"] = beneficiary
-        updated["Line_Total"] = _compute_line_totals(updated)
         updated["Split_Type"] = updated["Beneficiary"].apply(_split_type_for_beneficiary)
     return updated, apply_clicked
 
@@ -634,7 +690,8 @@ if selected_tab == "Upload Receipt":
         st.subheader("Line-items")
         st.caption(
             "Choose a line item below, edit its fields, then apply the changes. "
-            "Line Total is calculated from Qty, Unit Price, and Discount."
+            "Line Total is editable and drives allocations. Changing Qty, Unit Price, or Discount "
+            "recalculates it; changing Line Total adjusts Unit Price to match."
         )
         # Display labels for the Beneficiary column.
         _ben_options = list(_BENEFICIARY_LABELS.values())  # e.g. ["All (Shin…)", "Shin", ...]
@@ -932,7 +989,8 @@ elif selected_tab == "Past Receipts":
                     st.subheader("Line-items")
                     st.caption(
                         "Choose a line item below, edit its fields, then apply the changes. "
-                        "Line Total is calculated from Qty, Unit Price, and Discount."
+                        "Line Total is editable and drives allocations. Changing Qty, Unit Price, "
+                        "or Discount recalculates it; changing Line Total adjusts Unit Price to match."
                     )
                     edited_df, item_edit_applied = _edit_one_line_item(
                         df_items,
