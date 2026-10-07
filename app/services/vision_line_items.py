@@ -46,10 +46,6 @@ class LineItem(BaseModel):
         default="General",
         description="Category tag: Food, Drink, Toiletries, Household, General — never null or empty.",
     )
-    discount: float = Field(
-        default=0.0,
-        description="Separate discount only when it is not already reflected in price.",
-    )
     beneficiary: Literal["A", "B", "C", "AB", "BC", "AC", "ALL"] = Field(
         default="ALL",
         description="Who shares this item's cost: A, B, C, AB, BC, AC, or ALL.",
@@ -88,14 +84,16 @@ Read the receipt carefully, especially the final amount at the bottom:
   It is the source of truth. Never calculate or guess it from the item rows.
 - Receipt item prices are normally tax-inclusive. Do not add a VAT/tax breakdown
   to total_amount a second time.
-- Include every charge and discount exactly once. Use the rightmost Total
-  column as each item's final price; it already includes the quantity and any
-  line discount. Keep the printed qty as informational quantity, including
-  fractional weights such as 0.42 kg; do not round it or multiply the line
-  total when deciding price.
-- Use a negative price for a separate discount/refund row (including Swiss
-  trailing-minus values such as 3.60-). Set discount to 0 when the printed line
-  total already includes that discount.
+- For Swiss receipts with Artikel, Menge, Preis, Aktion, and Total columns,
+  read each physical row horizontally. Return one item per printed row, in the
+  same order. Never move a number to the row above or below it.
+- Read qty from Menge, including fractional weights such as 0.420 kg. Read
+  price from the rightmost Total column on that same row. Preis is the unit
+  price; Aktion is informational. Do not multiply Total by qty or subtract
+  Aktion from Total because Total already reflects the final line amount.
+- Include every charge and discount exactly once. A separate Rabatt/refund
+  row with a trailing minus (such as 3.60-) is one negative-price item (-3.60).
+  Do not also create a discount field or subtract the amount a second time.
 - header_discounts is a positive amount for a receipt-wide discount that is
   not already included in item prices. Use 0 when absent.
 - beneficiary is the only per-item allocation field: one of A, B, C, AB, BC,
@@ -110,8 +108,9 @@ JSON shape:
   "total_amount": 14.74,
   "header_discounts": 0.0,
   "items": [
-    {"name": "Milk", "price": 3.50, "qty": 2, "category": "Drink", "discount": 0.0, "beneficiary": "ALL"},
-    {"name": "Rabatt", "price": -1.20, "qty": 1, "category": "General", "discount": 0.0, "beneficiary": "ALL"}
+    {"name": "Milk", "price": 3.50, "qty": 2, "category": "Drink", "beneficiary": "ALL"},
+    {"name": "Weighed item", "price": 5.55, "qty": 0.420, "category": "Food", "beneficiary": "ALL"},
+    {"name": "Rabatt", "price": -1.20, "qty": 1, "category": "General", "beneficiary": "ALL"}
   ]
 }
 """
@@ -243,6 +242,82 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
                 # Clean and parse.
                 cleaned = _strip_markdown_json(content)
                 receipt = ItemizedReceipt.model_validate_json(cleaned)
+
+                # If extracted rows do not reconcile to the printed footer,
+                # give the vision model one focused pass to re-check row/column
+                # alignment. Keep whichever parse is closer; never fabricate a
+                # balancing item or turn the discrepancy into a charge.
+                item_total = round(
+                    sum(item.price for item in receipt.items) - receipt.header_discounts,
+                    2,
+                )
+                initial_gap = round(receipt.total_amount - item_total, 2)
+                if abs(initial_gap) > 0.05:
+                    logger.warning(
+                        "vision_line_items: item rows total %.2f differs from footer %.2f by %.2f; rechecking receipt rows",
+                        item_total,
+                        receipt.total_amount,
+                        initial_gap,
+                    )
+                    try:
+                        correction_response = client.chat.completions.create(
+                            model=model_name,
+                            messages=[
+                                {"role": "system", "content": _SYSTEM_PROMPT},
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": (
+                                                "Re-read every printed item row and return corrected JSON. "
+                                                f"Your previous item rows total CHF {item_total:.2f} after header "
+                                                f"discounts, while the receipt footer says CHF {receipt.total_amount:.2f} "
+                                                f"(difference CHF {initial_gap:.2f}). Check for omitted rows and values "
+                                                "shifted between adjacent rows, especially the rightmost Total column. "
+                                                "Do not invent a balancing item, duplicate an Aktion discount, or add tax twice."
+                                            ),
+                                        },
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {"url": image_data_url},
+                                        },
+                                    ],
+                                },
+                            ],
+                            response_format={"type": "json_object"},
+                            max_tokens=4096,
+                        )
+                        correction_content = correction_response.choices[0].message.content
+                        if correction_content:
+                            corrected = ItemizedReceipt.model_validate_json(
+                                _strip_markdown_json(correction_content)
+                            )
+                            corrected_total = round(
+                                sum(item.price for item in corrected.items)
+                                - corrected.header_discounts,
+                                2,
+                            )
+                            corrected_gap = round(
+                                corrected.total_amount - corrected_total,
+                                2,
+                            )
+                            if abs(corrected_gap) < abs(initial_gap):
+                                receipt = corrected
+                                logger.info(
+                                    "vision_line_items: reconciliation pass improved gap from %.2f to %.2f",
+                                    initial_gap,
+                                    corrected_gap,
+                                )
+                            else:
+                                logger.warning(
+                                    "vision_line_items: reconciliation pass did not improve the total gap"
+                                )
+                    except Exception:
+                        logger.exception(
+                            "vision_line_items: reconciliation pass failed; keeping first parse"
+                        )
+
                 logger.info(
                     "vision_line_items parsed with '%s': merchant=%s items=%d total=%.2f",
                     model_name, receipt.merchant, len(receipt.items), receipt.total_amount,
