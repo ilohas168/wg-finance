@@ -7,16 +7,13 @@ price, quantity, category) from a receipt image with one Qwen vision request.
 from __future__ import annotations
 
 import base64
-import io
 import json
 import logging
-import math
 import os
 import re
-from typing import Any, Dict, List, Literal, Sequence
+from typing import Any, Dict, List, Literal
 
 import groq
-from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -87,9 +84,6 @@ Read the receipt carefully, especially the final amount at the bottom:
   translate, expand, or replace an unfamiliar name with a likely product name.
   If a character is genuinely unreadable, mark only that character with `?`;
   do not guess the rest of the name.
-- The user may provide several overlapping crops of the same receipt. Treat
-  them as consecutive views of one receipt, combine their rows in top-to-bottom
-  order, and include any row visible in an overlap only once.
 - Read qty from Menge, including fractional weights such as 0.420 kg. Read
   price from the rightmost Total column on that same row. Preis is the unit
   price; Aktion is informational. Do not multiply Total by qty or subtract
@@ -145,75 +139,16 @@ def _strip_markdown_json(raw: str) -> str:
     return stripped
 
 
-# --------------------------------------------------------------------------- #
-# Image compression                                                            #
-# --------------------------------------------------------------------------- #
-
-_MAX_INLINE_IMAGE_BYTES = 6 * 1024 * 1024
-_MAX_CROP_IMAGE_BYTES = 768 * 1024
-_JPEG_QUALITY = 95
-
-
-def _encode_image(image: Image.Image, max_bytes: int) -> bytes:
-    """Encode an image as high-quality JPEG, reducing it only when necessary."""
-    quality = _JPEG_QUALITY
-    for _ in range(12):
-        out = io.BytesIO()
-        image.save(out, format="JPEG", quality=quality, optimize=True)
-        encoded = out.getvalue()
-        if len(encoded) <= max_bytes:
-            return encoded
-
-        max_dim = max(image.size)
-        if max_dim > 1200:
-            scale = min(0.95, math.sqrt(max_bytes / len(encoded)) * 0.95)
-            new_size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
-            image = image.resize(new_size, Image.Resampling.LANCZOS)
-        elif quality > 75:
-            quality -= 5
-        else:
-            break
-
-    raise ValueError("Could not reduce the receipt image below Groq's image request limit.")
-
-
-def _prepare_images(image_bytes: bytes) -> list[tuple[bytes, str]]:
-    """Prepare one image or three overlapping detail crops for a tall receipt.
-
-    Tall images are split into three overlapping, full-width crops. This makes
-    each printed row larger for OCR while preserving receipt order. Each crop
-    is capped at 768 KiB so the combined base64 request stays compact.
-    """
-    with Image.open(io.BytesIO(image_bytes)) as source:
-        image_format = (source.format or "").upper()
-        image = ImageOps.exif_transpose(source).convert("RGB")
-
-    # Keep compact, non-tall JPEGs byte-for-byte. For tall receipts, close
-    # detail crops give the vision model more readable text per image.
-    is_tall = image.height / image.width >= 1.25
-    if not is_tall and image_format == "JPEG" and len(image_bytes) <= _MAX_INLINE_IMAGE_BYTES:
-        return [(image_bytes, "image/jpeg")]
-
-    if not is_tall:
-        return [(_encode_image(image, _MAX_INLINE_IMAGE_BYTES), "image/jpeg")]
-
-    crop_height = max(1, (image.height + 1) // 2)
-    starts = (0, (image.height - crop_height) // 2, image.height - crop_height)
-    crops = [image.crop((0, top, image.width, top + crop_height)) for top in starts]
-    return [(_encode_image(crop, _MAX_CROP_IMAGE_BYTES), "image/jpeg") for crop in crops]
-
-
-def _image_content(prepared_images: Sequence[tuple[bytes, str]]) -> list[dict[str, Any]]:
-    """Encode prepared JPEGs as Groq image_url content blocks."""
-    return [
-        {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:{mime_type};base64,{base64.b64encode(image).decode('utf-8')}"
-            },
-        }
-        for image, mime_type in prepared_images
-    ]
+def _image_data_url(image_bytes: bytes) -> str:
+    """Base64-wrap the original JPEG/PNG bytes without changing the image."""
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime_type = "image/png"
+    elif image_bytes.startswith(b"\xff\xd8\xff"):
+        mime_type = "image/jpeg"
+    else:
+        raise ValueError("Receipt image must be a JPEG or PNG file.")
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
 
 
 # --------------------------------------------------------------------------- #
@@ -238,9 +173,8 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
     ValueError
         If Groq returns no content or the response cannot be parsed.
     """
-    # Retain high-detail crops for tall receipts, but send them in one request.
-    prepared_images = _prepare_images(image_bytes)
-    image_content = _image_content(prepared_images)
+    # Preserve the uploaded image exactly; base64 is only the API transport format.
+    image_url = _image_data_url(image_bytes)
     logger.info("vision_line_items: parsing with '%s'", _VISION_MODEL)
     response = _get_client().chat.completions.create(
         model=_VISION_MODEL,
@@ -250,7 +184,7 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "Parse this receipt. Return structured JSON."},
-                    *image_content,
+                    {"type": "image_url", "image_url": {"url": image_url}},
                 ],
             },
         ],
