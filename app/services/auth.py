@@ -67,7 +67,33 @@ def _ensure_users_sheet() -> None:
         logger.warning("Could not read Users worksheet values.")
         return
 
-    # If only headers (or empty), seed defaults.
+    headers = ["Username", "PasswordHash", "Name"]
+
+    # A manually created empty worksheet does not have the header row that
+    # _ensure_users_sheet adds when it creates the worksheet itself.
+    if not values or not any(str(cell).strip() for cell in values[0]):
+        try:
+            ws.insert_row(headers, idx=1)
+            values = [headers]
+        except Exception:
+            logger.warning("Could not add headers to Users worksheet.")
+            return
+    # Migrate default rows seeded by older code when an existing empty tab had
+    # no header: otherwise the first user row is misread as the column names.
+    elif (
+        len(values[0]) > 1
+        and str(values[0][0]).strip().lower() in _DEFAULT_PASSWORDS
+        and str(values[0][1]).strip()
+        and "username" not in [str(cell).strip().lower() for cell in values[0]]
+    ):
+        try:
+            ws.insert_row(headers, idx=1)
+            values.insert(0, headers)
+        except Exception:
+            logger.warning("Could not repair missing headers in Users worksheet.")
+            return
+
+    # If only headers remain, seed defaults.
     if len(values) <= 1:
         rows_to_add = []
         for username, password in _DEFAULT_PASSWORDS.items():
