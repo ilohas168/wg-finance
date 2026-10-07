@@ -1,8 +1,7 @@
-"""Line-item receipt parser — Groq vision with multi-model fallback.
+"""Single-request line-item receipt parser using Groq vision.
 
 Provides ``parse_itemized_receipt()`` which extracts individual line-items (name,
-price, quantity, category) from a receipt image using any of the active Groq
-vision models.  If the first candidate raises a 404 it falls back automatically.
+price, quantity, category) from a receipt image with one Qwen vision request.
 """
 
 from __future__ import annotations
@@ -14,11 +13,9 @@ import logging
 import math
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional, Sequence, Literal
+from typing import Any, Dict, List, Literal, Sequence
 
 import groq
-from groq import NotFoundError
 from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 
@@ -69,14 +66,10 @@ class ItemizedReceipt(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Model candidates (priority order)                                            #
+# Model                                                                        #
 # --------------------------------------------------------------------------- #
 
-_VISION_MODEL_CANDIDATES: list[str] = [
-    "qwen/qwen3.8-27b",
-    "qwen/qwen3.6-27b",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
-]
+_VISION_MODEL = "qwen/qwen3.8-27b"
 
 _SYSTEM_PROMPT: str = """You extract receipts into JSON for a 3-person sharehouse.
 Return valid JSON only, with no markdown or extra text.
@@ -152,113 +145,6 @@ def _strip_markdown_json(raw: str) -> str:
     return stripped
 
 
-def _request_focused_names(
-    model_name: str,
-    image_content: list[dict[str, Any]],
-) -> Optional[list[Any]]:
-    """Read product labels independently while the full receipt is parsed."""
-    response = _get_client().chat.completions.create(
-        model=model_name,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a receipt OCR transcriber. Copy visible text exactly; "
-                    "never autocorrect or infer product names. Return valid JSON only."
-                ),
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Transcribe only the item descriptions in the leftmost Artikel column, "
-                            "top to bottom. Preserve the printed spelling, capitalization, "
-                            "abbreviations, and truncation, even when a name looks misspelled. "
-                            "Do not translate, expand, or guess unreadable characters; use ? only "
-                            "for an unreadable character. Return one string per physical receipt "
-                            "row in a JSON object shaped as {\"names\":[\"...\"]}. These images "
-                            "are overlapping views of one receipt: deduplicate rows visible in "
-                            "overlaps. Include discounts as printed rows."
-                        ),
-                    },
-                    *image_content,
-                ],
-            },
-        ],
-        response_format={"type": "json_object"},
-        max_tokens=2048,
-    )
-    content = response.choices[0].message.content
-    if not content:
-        return None
-    data = json.loads(_strip_markdown_json(content))
-    names = data.get("names") if isinstance(data, dict) else None
-    return names if isinstance(names, list) else None
-
-
-def _request_focused_prices(
-    model_name: str,
-    prepared_images: Sequence[tuple[bytes, str]],
-    receipt: ItemizedReceipt,
-    item_total: float,
-) -> Optional[list[float]]:
-    """Re-read the printed Total column without adjusting values to balance."""
-    image_content = _image_content(_prepare_column_images(prepared_images, "right"))
-    response = _get_client().chat.completions.create(
-        model=model_name,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are transcribing receipt line totals. Read the printed columns "
-                    "carefully and return valid JSON only. Never calculate a balancing amount."
-                ),
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Read only the far-right Total column for exactly {len(receipt.items)} "
-                            "item rows, in top-to-bottom order. Return a JSON object with exactly "
-                            f"{len(receipt.items)} numeric values in a `prices` array. Each value "
-                            "must be copied from that row's rightmost Total cell. Ignore Menge, "
-                            "Preis, and Aktion; do not multiply, subtract, infer, or shift values "
-                            "between rows. A separate trailing-minus discount is negative. "
-                            f"The earlier row sum was CHF {item_total:.2f}; the printed footer "
-                            f"is CHF {receipt.total_amount:.2f}. Do not adjust any value just "
-                            "to make the sum match; copy the printed cells even if they do not add up."
-                        ),
-                    },
-                    *image_content,
-                ],
-            },
-        ],
-        response_format={"type": "json_object"},
-        max_tokens=2048,
-    )
-    content = response.choices[0].message.content
-    if not content:
-        return None
-    data = json.loads(_strip_markdown_json(content))
-    prices = data.get("prices") if isinstance(data, dict) else None
-    if not (
-        isinstance(prices, list)
-        and len(prices) == len(receipt.items)
-        and all(
-            isinstance(price, (int, float))
-            and not isinstance(price, bool)
-            and math.isfinite(price)
-            for price in prices
-        )
-    ):
-        raise ValueError("Focused line-total check returned an invalid price list.")
-    return [float(price) for price in prices]
-
-
 # --------------------------------------------------------------------------- #
 # Image compression                                                            #
 # --------------------------------------------------------------------------- #
@@ -317,34 +203,6 @@ def _prepare_images(image_bytes: bytes) -> list[tuple[bytes, str]]:
     return [(_encode_image(crop, _MAX_CROP_IMAGE_BYTES), "image/jpeg") for crop in crops]
 
 
-def _prepare_column_images(
-    prepared_images: Sequence[tuple[bytes, str]],
-    side: Literal["left", "right"],
-) -> list[tuple[bytes, str]]:
-    """Crop the relevant receipt column for focused OCR passes.
-
-    The names check needs the left 70% containing the Artikel column. The
-    price check needs the right 45%, which contains the printed Total column.
-    Vertical overlaps and original crop height are preserved for row order and
-    legibility.
-    """
-    focused_images: list[tuple[bytes, str]] = []
-    for image_bytes, _mime_type in prepared_images:
-        with Image.open(io.BytesIO(image_bytes)) as source:
-            image = ImageOps.exif_transpose(source).convert("RGB")
-        width, height = image.size
-        if side == "left":
-            crop = image.crop((0, 0, max(1, round(width * 0.70)), height))
-        else:
-            crop = image.crop((max(0, round(width * 0.55)), 0, width, height))
-        # Never shrink a focused crop below the byte budget of its source.
-        # Cropping alone reduces payload while preserving the printed detail.
-        focused_images.append(
-            (_encode_image(crop, max(_MAX_CROP_IMAGE_BYTES, len(image_bytes))), "image/jpeg")
-        )
-    return focused_images
-
-
 def _image_content(prepared_images: Sequence[tuple[bytes, str]]) -> list[dict[str, Any]]:
     """Encode prepared JPEGs as Groq image_url content blocks."""
     return [
@@ -363,10 +221,7 @@ def _image_content(prepared_images: Sequence[tuple[bytes, str]]) -> list[dict[st
 # --------------------------------------------------------------------------- #
 
 def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
-    """Parse a receipt image into an ``ItemizedReceipt`` using Groq vision.
-
-    Automatically falls back through ``_VISION_MODEL_CANDIDATES`` when a model
-    returns 404 / ``model_not_found``.
+    """Parse and validate a receipt with one Groq vision request.
 
     Parameters
     ----------
@@ -381,180 +236,55 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
     Raises
     ------
     ValueError
-        If all candidate models fail or the response cannot be parsed.
+        If Groq returns no content or the response cannot be parsed.
     """
-    candidates = list(_VISION_MODEL_CANDIDATES)
-    last_exc: Optional[Exception] = None
-
-    # Image preparation is independent of the selected model. Do it once so
-    # model fallbacks do not repeat the same crop, JPEG, and base64 work.
+    # Retain high-detail crops for tall receipts, but send them in one request.
     prepared_images = _prepare_images(image_bytes)
     image_content = _image_content(prepared_images)
-    # The verification pass only needs the product-description column. Sending
-    # focused crops cuts its image payload while retaining all rows and overlap.
-    name_image_content = _image_content(_prepare_column_images(prepared_images, "left"))
-
-    for model_name in candidates:
-        logger.info("vision_line_items: trying model '%s'", model_name)
-        client = _get_client()
-        # Name OCR is independent of numeric extraction. Start it alongside
-        # the full parse, then retain it only when its row count matches.
-        checks = ThreadPoolExecutor(max_workers=2)
-        names_future = checks.submit(_request_focused_names, model_name, name_image_content)
-
-        try:
-            for attempt in range(1, 4):
-                try:
-                    response = client.chat.completions.create(
-                        model=model_name,
-                        messages=[
-                            {"role": "system", "content": _SYSTEM_PROMPT},
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": "Parse this receipt. Return structured JSON."},
-                                    *image_content,
-                                ],
-                            },
-                        ],
-                        response_format={"type": "json_object"},
-                        max_tokens=4096,
-                    )
-
-                    content = response.choices[0].message.content
-                    if content is None:
-                        raise ValueError("Groq returned no content for the receipt image.")
-                    receipt = ItemizedReceipt.model_validate_json(_strip_markdown_json(content))
-
-                    # On a total mismatch, start the focused price check while
-                    # name OCR is already in flight. Both checks use the same
-                    # original high-detail crops and remain independently validated.
-                    item_total = round(
-                        sum(item.price for item in receipt.items) - receipt.header_discounts,
-                        2,
-                    )
-                    initial_gap = round(receipt.total_amount - item_total, 2)
-                    correction_future = None
-                    if abs(initial_gap) > 0.05:
-                        logger.warning(
-                            "vision_line_items: item rows total %.2f differs from footer %.2f by %.2f; rechecking receipt rows",
-                            item_total,
-                            receipt.total_amount,
-                            initial_gap,
-                        )
-                        correction_future = checks.submit(
-                            _request_focused_prices,
-                            model_name,
-                            prepared_images,
-                            receipt,
-                            item_total,
-                        )
-                    try:
-                        names = names_future.result()
-                        if names is not None:
-                            if (
-                                len(names) == len(receipt.items)
-                                and all(isinstance(name, str) and name.strip() for name in names)
-                            ):
-                                for item, name in zip(receipt.items, names):
-                                    item.name = name.strip()
-                            else:
-                                logger.warning(
-                                    "vision_line_items: focused name OCR returned %s names for %d items; keeping original names",
-                                    len(names),
-                                    len(receipt.items),
-                                )
-                    except Exception:
-                        logger.exception(
-                            "vision_line_items: focused name OCR failed; keeping names from full parse"
-                        )
-
-                    if correction_future is not None:
-                        try:
-                            prices = correction_future.result()
-                            if prices is not None:
-                                corrected_total = round(sum(prices) - receipt.header_discounts, 2)
-                                corrected_gap = round(receipt.total_amount - corrected_total, 2)
-                                if abs(corrected_gap) < abs(initial_gap):
-                                    receipt.items = [
-                                        item.model_copy(update={"price": price})
-                                        for item, price in zip(receipt.items, prices)
-                                    ]
-                                    logger.info(
-                                        "vision_line_items: focused total check improved gap from %.2f to %.2f",
-                                        initial_gap,
-                                        corrected_gap,
-                                    )
-                                else:
-                                    logger.warning(
-                                        "vision_line_items: focused total check did not improve the total gap"
-                                    )
-                        except Exception:
-                            logger.exception(
-                                "vision_line_items: focused total check failed; keeping first parse"
-                            )
-
-                    logger.info(
-                        "vision_line_items parsed with '%s': merchant=%s items=%d total=%.2f",
-                        model_name,
-                        receipt.merchant,
-                        len(receipt.items),
-                        receipt.total_amount,
-                    )
-                    return receipt
-
-                except NotFoundError as exc:
-                    logger.warning(
-                        "vision_line_items: model '%s' not found (404) — trying next candidate",
-                        model_name,
-                    )
-                    last_exc = exc
-                    break
-
-                except Exception as exc:
-                    last_exc = exc
-                    status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
-                    error_msg = str(exc).lower()
-                    if status_code == 413 or "request_too_large" in error_msg or "request entity too large" in error_msg:
-                        logger.warning(
-                            "vision_line_items: image request too large for '%s' — trying next model",
-                            model_name,
-                        )
-                        break
-                    is_transient = (
-                        status_code in (429, 503)
-                        or "rate limit" in error_msg
-                        or "unavailable" in error_msg
-                        or "overloaded" in error_msg
-                    )
-                    if is_transient and attempt < 3:
-                        delay = 2 * (2 ** (attempt - 1))
-                        logger.warning(
-                            "vision_line_items: transient error on '%s' (attempt %d/3) — retrying in %.0fs",
-                            model_name,
-                            attempt,
-                            delay,
-                        )
-                        import time
-                        time.sleep(delay)
-                    elif getattr(exc, "status_code", None) == 404 or "model_not_found" in str(exc).lower():
-                        logger.warning(
-                            "vision_line_items: model '%s' failed (not found?) — trying next candidate",
-                            model_name,
-                        )
-                        break
-                    else:
-                        raise
-        finally:
-            # On success both futures have completed. If the model fails, avoid
-            # holding up fallback attempts for an obsolete OCR request.
-            checks.shutdown(wait=False, cancel_futures=True)
-
-    logger.exception(
-        "vision_line_items: all candidates exhausted (image=%d bytes)",
-        len(image_bytes),
+    logger.info("vision_line_items: parsing with '%s'", _VISION_MODEL)
+    response = _get_client().chat.completions.create(
+        model=_VISION_MODEL,
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Parse this receipt. Return structured JSON."},
+                    *image_content,
+                ],
+            },
+        ],
+        response_format={"type": "json_object"},
+        max_tokens=4096,
     )
-    raise ValueError(str(last_exc)) from last_exc
+
+    content = response.choices[0].message.content
+    if not content:
+        raise ValueError("Groq returned no content for the receipt image.")
+    receipt = ItemizedReceipt.model_validate_json(_strip_markdown_json(content))
+
+    # Compare totals locally and report discrepancies without another model call.
+    item_total = round(
+        sum(item.price for item in receipt.items) - receipt.header_discounts,
+        2,
+    )
+    gap = round(receipt.total_amount - item_total, 2)
+    if abs(gap) > 0.05:
+        logger.warning(
+            "vision_line_items: item rows total %.2f differs from footer %.2f by %.2f",
+            item_total,
+            receipt.total_amount,
+            gap,
+        )
+
+    logger.info(
+        "vision_line_items parsed with '%s': merchant=%s items=%d total=%.2f",
+        _VISION_MODEL,
+        receipt.merchant,
+        len(receipt.items),
+        receipt.total_amount,
+    )
+    return receipt
 
 
 def parse_itemized_receipt_dict(image_bytes: bytes) -> Dict[str, Any]:

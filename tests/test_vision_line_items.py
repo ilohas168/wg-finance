@@ -1,6 +1,5 @@
 import io
 import json
-import threading
 from types import SimpleNamespace
 
 from PIL import Image
@@ -8,9 +7,9 @@ from PIL import Image
 from app.services import vision_line_items
 
 
-def test_parse_overlaps_name_ocr_and_keeps_matching_names(monkeypatch):
-    name_ocr_started = threading.Event()
+def test_parse_uses_one_model_request(monkeypatch):
     prepare_calls = 0
+    model_calls = []
     payload = {
         "merchant": "Coop",
         "date": "2026-09-12",
@@ -31,7 +30,7 @@ def test_parse_overlaps_name_ocr_and_keeps_matching_names(monkeypatch):
             class Completions:
                 @staticmethod
                 def create(**kwargs):
-                    assert name_ocr_started.wait(timeout=1), "name OCR did not start with the full parse"
+                    model_calls.append(kwargs)
                     return SimpleNamespace(
                         choices=[
                             SimpleNamespace(
@@ -44,10 +43,6 @@ def test_parse_overlaps_name_ocr_and_keeps_matching_names(monkeypatch):
 
         chat = Chat()
 
-    def fake_names(model_name, image_content):
-        name_ocr_started.set()
-        return ["Printed OCR name"]
-
     def fake_prepare(image_bytes):
         nonlocal prepare_calls
         prepare_calls += 1
@@ -55,25 +50,24 @@ def test_parse_overlaps_name_ocr_and_keeps_matching_names(monkeypatch):
 
     monkeypatch.setattr(vision_line_items, "_get_client", lambda: FakeClient())
     monkeypatch.setattr(vision_line_items, "_prepare_images", fake_prepare)
-    monkeypatch.setattr(vision_line_items, "_prepare_column_images", lambda images, side: images)
-    monkeypatch.setattr(vision_line_items, "_request_focused_names", fake_names)
-    monkeypatch.setattr(vision_line_items, "_VISION_MODEL_CANDIDATES", ["test-model"])
+    monkeypatch.setattr(vision_line_items, "_VISION_MODEL", "test-model")
 
     receipt = vision_line_items.parse_itemized_receipt(b"receipt-image")
 
-    assert receipt.items[0].name == "Printed OCR name"
+    assert receipt.items[0].name == "Initial parse name"
     assert prepare_calls == 1
+    assert len(model_calls) == 1
+    assert model_calls[0]["model"] == "test-model"
 
 
-def test_focused_ocr_crops_preserve_receipt_rows_and_target_columns():
+def test_tall_receipt_is_sent_as_three_detail_crops():
     source = io.BytesIO()
-    Image.new("RGB", (100, 80), "white").save(source, format="JPEG")
-    prepared = [(source.getvalue(), "image/jpeg")]
+    Image.new("RGB", (100, 400), "white").save(source, format="JPEG")
+    prepared = vision_line_items._prepare_images(source.getvalue())
 
-    name_crop = vision_line_items._prepare_column_images(prepared, "left")
-    price_crop = vision_line_items._prepare_column_images(prepared, "right")
+    assert len(prepared) == 3
 
-    with Image.open(io.BytesIO(name_crop[0][0])) as image:
-        assert image.size == (70, 80)
-    with Image.open(io.BytesIO(price_crop[0][0])) as image:
-        assert image.size == (45, 80)
+    for image_bytes, mime_type in prepared:
+        assert mime_type == "image/jpeg"
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            assert image.size == (100, 200)
