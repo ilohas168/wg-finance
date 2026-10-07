@@ -200,11 +200,12 @@ def _request_focused_names(
 
 def _request_focused_prices(
     model_name: str,
-    image_content: list[dict[str, Any]],
+    prepared_images: Sequence[tuple[bytes, str]],
     receipt: ItemizedReceipt,
     item_total: float,
 ) -> Optional[list[float]]:
     """Re-read the printed Total column without adjusting values to balance."""
+    image_content = _image_content(_prepare_column_images(prepared_images, "right"))
     response = _get_client().chat.completions.create(
         model=model_name,
         messages=[
@@ -316,6 +317,47 @@ def _prepare_images(image_bytes: bytes) -> list[tuple[bytes, str]]:
     return [(_encode_image(crop, _MAX_CROP_IMAGE_BYTES), "image/jpeg") for crop in crops]
 
 
+def _prepare_column_images(
+    prepared_images: Sequence[tuple[bytes, str]],
+    side: Literal["left", "right"],
+) -> list[tuple[bytes, str]]:
+    """Crop the relevant receipt column for focused OCR passes.
+
+    The names check needs the left 70% containing the Artikel column. The
+    price check needs the right 45%, which contains the printed Total column.
+    Vertical overlaps and original crop height are preserved for row order and
+    legibility.
+    """
+    focused_images: list[tuple[bytes, str]] = []
+    for image_bytes, _mime_type in prepared_images:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+        width, height = image.size
+        if side == "left":
+            crop = image.crop((0, 0, max(1, round(width * 0.70)), height))
+        else:
+            crop = image.crop((max(0, round(width * 0.55)), 0, width, height))
+        # Never shrink a focused crop below the byte budget of its source.
+        # Cropping alone reduces payload while preserving the printed detail.
+        focused_images.append(
+            (_encode_image(crop, max(_MAX_CROP_IMAGE_BYTES, len(image_bytes))), "image/jpeg")
+        )
+    return focused_images
+
+
+def _image_content(prepared_images: Sequence[tuple[bytes, str]]) -> list[dict[str, Any]]:
+    """Encode prepared JPEGs as Groq image_url content blocks."""
+    return [
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{mime_type};base64,{base64.b64encode(image).decode('utf-8')}"
+            },
+        }
+        for image, mime_type in prepared_images
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Public API                                                                   #
 # --------------------------------------------------------------------------- #
@@ -347,15 +389,10 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
     # Image preparation is independent of the selected model. Do it once so
     # model fallbacks do not repeat the same crop, JPEG, and base64 work.
     prepared_images = _prepare_images(image_bytes)
-    image_content = [
-        {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:{mime_type};base64,{base64.b64encode(image).decode('utf-8')}"
-            },
-        }
-        for image, mime_type in prepared_images
-    ]
+    image_content = _image_content(prepared_images)
+    # The verification pass only needs the product-description column. Sending
+    # focused crops cuts its image payload while retaining all rows and overlap.
+    name_image_content = _image_content(_prepare_column_images(prepared_images, "left"))
 
     for model_name in candidates:
         logger.info("vision_line_items: trying model '%s'", model_name)
@@ -363,7 +400,7 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
         # Name OCR is independent of numeric extraction. Start it alongside
         # the full parse, then retain it only when its row count matches.
         checks = ThreadPoolExecutor(max_workers=2)
-        names_future = checks.submit(_request_focused_names, model_name, image_content)
+        names_future = checks.submit(_request_focused_names, model_name, name_image_content)
 
         try:
             for attempt in range(1, 4):
@@ -408,7 +445,7 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
                         correction_future = checks.submit(
                             _request_focused_prices,
                             model_name,
-                            image_content,
+                            prepared_images,
                             receipt,
                             item_total,
                         )

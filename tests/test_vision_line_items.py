@@ -1,6 +1,9 @@
+import io
 import json
 import threading
 from types import SimpleNamespace
+
+from PIL import Image
 
 from app.services import vision_line_items
 
@@ -52,6 +55,7 @@ def test_parse_overlaps_name_ocr_and_keeps_matching_names(monkeypatch):
 
     monkeypatch.setattr(vision_line_items, "_get_client", lambda: FakeClient())
     monkeypatch.setattr(vision_line_items, "_prepare_images", fake_prepare)
+    monkeypatch.setattr(vision_line_items, "_prepare_column_images", lambda images, side: images)
     monkeypatch.setattr(vision_line_items, "_request_focused_names", fake_names)
     monkeypatch.setattr(vision_line_items, "_VISION_MODEL_CANDIDATES", ["test-model"])
 
@@ -59,3 +63,17 @@ def test_parse_overlaps_name_ocr_and_keeps_matching_names(monkeypatch):
 
     assert receipt.items[0].name == "Printed OCR name"
     assert prepare_calls == 1
+
+
+def test_focused_ocr_crops_preserve_receipt_rows_and_target_columns():
+    source = io.BytesIO()
+    Image.new("RGB", (100, 80), "white").save(source, format="JPEG")
+    prepared = [(source.getvalue(), "image/jpeg")]
+
+    name_crop = vision_line_items._prepare_column_images(prepared, "left")
+    price_crop = vision_line_items._prepare_column_images(prepared, "right")
+
+    with Image.open(io.BytesIO(name_crop[0][0])) as image:
+        assert image.size == (70, 80)
+    with Image.open(io.BytesIO(price_crop[0][0])) as image:
+        assert image.size == (45, 80)
