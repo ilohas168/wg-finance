@@ -109,6 +109,19 @@ st.markdown(
     .wg-period { text-align: center; font-size: 1.35rem; font-weight: 750; }
     .wg-split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.7rem; }
     .wg-split .wg-value { font-size: 1.25rem; }
+    .wg-chip {
+        display: inline-block; margin: 0 0.4rem 0.4rem 0; padding: 0.2rem 0.6rem;
+        border-radius: 999px; font-size: 0.85rem;
+        border: 1px solid var(--wg-accent); background: color-mix(in srgb, var(--wg-accent) 12%, transparent);
+    }
+    table.wg-items { width: 100%; border-collapse: collapse; margin: 0.3rem 0 0.8rem; font-size: 0.92rem; }
+    table.wg-items th { text-align: left; font-weight: 600; opacity: 0.7; padding: 0.35rem 0.4rem; border-bottom: 1px solid rgba(128,128,128,0.3); }
+    table.wg-items td { padding: 0.45rem 0.4rem; border-bottom: 1px solid rgba(128,128,128,0.15); vertical-align: top; }
+    table.wg-items .wg-num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    div[class*="_monthnav"] div[data-testid="stHorizontalBlock"] { flex-wrap: nowrap; }
+    div[class*="_monthnav"] div[data-testid="stColumn"] { min-width: 0 !important; width: auto !important; }
+    @media (max-width: 640px) { .wg-period { font-size: 1.05rem; } }
+    .wg-list-summary { font-size: 0.95rem; opacity: 0.8; margin: 0.4rem 0 0.8rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -680,6 +693,89 @@ def _receipts_table(frame: pd.DataFrame, with_shares: bool = False, height: Any 
     st.dataframe(frame[columns], hide_index=True, column_config=config, height=height)
 
 
+def _month_nav(prefix: str) -> Optional[pd.Period]:
+    """◀ month ▶ navigation plus an All-time switch; returns None for all time.
+
+    Starts on the current month and never goes past it.
+    """
+    this_month = pd.Timestamp(date.today()).to_period("M")
+    state_key = f"{prefix}_period"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = str(this_month)
+
+    def _shift_month(step: int) -> None:
+        current = st.session_state.get(state_key, str(this_month))
+        base = this_month if current == "all" else pd.Period(current, freq="M")
+        st.session_state[state_key] = str(min(base + step, this_month))
+
+    def _toggle_all_time() -> None:
+        st.session_state[state_key] = (
+            str(this_month) if st.session_state[state_key] == "all" else "all"
+        )
+
+    all_time = st.session_state[state_key] == "all"
+    period = None if all_time else pd.Period(st.session_state[state_key], freq="M")
+    # Keyed container so CSS can keep this row on one line on phones.
+    with st.container(key=f"{prefix}_monthnav"):
+        prev_col, label_col, next_col, all_col = st.columns(
+            [1, 3, 1, 1.6], vertical_alignment="center", gap="small"
+        )
+    with prev_col:
+        st.button("◀", key=f"{prefix}_prev", on_click=_shift_month, args=(-1,), width="stretch", help="Previous month")
+    with label_col:
+        st.markdown(
+            f'<div class="wg-period">{"All time" if all_time else period.strftime("%B %Y")}</div>',
+            unsafe_allow_html=True,
+        )
+    with next_col:
+        st.button(
+            "▶",
+            help="Next month",
+            key=f"{prefix}_next",
+            on_click=_shift_month,
+            args=(1,),
+            disabled=not all_time and period >= this_month,
+            width="stretch",
+        )
+    with all_col:
+        st.button(
+            "This month" if all_time else "All time",
+            key=f"{prefix}_all_time",
+            on_click=_toggle_all_time,
+            width="stretch",
+        )
+    return period
+
+
+def _items_html(items: pd.DataFrame) -> str:
+    """A static (non-scrolling) HTML table of a receipt's line items."""
+    rows = []
+    for _, item in items.iterrows():
+        qty = pd.to_numeric(item.get("Qty", 1), errors="coerce")
+        qty_text = "" if pd.isna(qty) or abs(qty - 1) < 1e-9 else f"{qty:g} × "
+        rows.append(
+            "<tr>"
+            f"<td>{escape(qty_text + str(item.get('Product_Name', '')))}"
+            f"<div class='wg-muted'>{escape(str(item.get('Category', '')))}</div></td>"
+            f"<td>{escape(str(item.get('Beneficiary', '')))}</td>"
+            f"<td class='wg-num'>{escape(_chf(float(item.get('Line_Total', 0) or 0)))}</td>"
+            "</tr>"
+        )
+    return (
+        "<table class='wg-items'><thead><tr><th>Item</th><th>For</th>"
+        "<th class='wg-num'>Amount</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    )
+
+
+def _share_chips(shares_by_name: dict[str, float]) -> str:
+    """Coloured per-roommate share chips for a receipt card."""
+    return "".join(
+        f"<span class='wg-chip' style='--wg-accent:{_ROOMMATE_COLORS[name]}'>"
+        f"{escape(name)} <b>{escape(_chf(amount))}</b></span>"
+        for name, amount in shares_by_name.items()
+    )
+
+
 def _category_series(breakdowns: list[ReceiptBreakdown], df_all_items: pd.DataFrame) -> pd.Series:
     """Positive category totals in CHF, smallest first (for horizontal bars)."""
     totals = pd.Series(category_totals_cents(breakdowns, df_all_items), dtype=float) / 100
@@ -1204,101 +1300,124 @@ elif selected_tab == "Upload Receipt":
 # =========================================================================== #
 
 elif selected_tab == "Past Receipts":
-    st.title("🧾 Past Receipts")
-    st.caption("Review receipt totals and each roommate's allocated spending; edit or delete receipts.")
+    st.title("🧾 Receipts")
     if st.session_state.pop("clear_edit_receipt_select", False):
-        st.session_state.pop("edit_receipt_select", None)
-    delete_message = st.session_state.pop("receipt_delete_message", None)
-    if delete_message:
-        st.success(delete_message)
-    receipt_date_message = st.session_state.pop("receipt_date_message", None)
-    if receipt_date_message:
-        st.success(receipt_date_message)
+        st.session_state.pop("editing_receipt", None)
+    for message_key in ("receipt_delete_message", "receipt_date_message", "receipt_update_message"):
+        message = st.session_state.pop(message_key, None)
+        if message:
+            st.success(message)
 
-    try:
-        with st.spinner("Loading receipts…"):
-            from app.services.ledger import get_all_receipts, get_receipt_items  # type: ignore
-            df_receipts = get_all_receipts()
-            df_all_items = get_receipt_items()
-    except Exception as exc:
-        st.error(f"Failed to load receipts: {exc}")
-        df_receipts = pd.DataFrame(columns=["Receipt_ID", "Date", "Store"])
-        df_all_items = pd.DataFrame(columns=["Receipt_ID", "Line_Total", "Beneficiary"])
-
+    df_receipts, df_all_items, _ = _load_ledger_data()
     breakdowns = receipt_breakdowns(df_receipts, df_all_items)
-    if breakdowns:
+    selected_rid = st.session_state.get("editing_receipt") if logged_in else None
+    if selected_rid and selected_rid not in {b.receipt_id for b in breakdowns}:
+        st.session_state.pop("editing_receipt", None)
+        selected_rid = None
+
+    if breakdowns and not selected_rid:
+        # ---------------- List view: browse, search, expand ---------------- #
+        st.caption("Tap a receipt to see its items and who pays what.")
+        period = _month_nav("receipts")
+        search_col, payer_col = st.columns([2, 3], vertical_alignment="bottom")
+        with search_col:
+            search = st.text_input(
+                "Search", placeholder="Store or item…", key="receipts_search",
+                label_visibility="collapsed",
+            ).strip().casefold()
+        with payer_col:
+            payer_filter = st.segmented_control(
+                "Paid by",
+                ["Everyone", *ROOMMATES],
+                default="Everyone",
+                required=True,
+                key="receipts_payer",
+                label_visibility="collapsed",
+            )
+
         ledger = _ledger_frame(breakdowns)
-        ledger["Difference"] = ledger["Items"] - ledger["Total"]
-        ledger["Check"] = ledger["Difference"].abs().map(lambda d: "⚠" if d > 0.01 else "✓")
-        st.subheader("All receipts")
-        st.caption(
-            "Newest first. Shares are each roommate's part of the items; ⚠ marks receipts "
-            "whose items don't add up to the printed total."
-        )
-        shown = ledger
-        if len(ledger) > 25 and not st.toggle(f"Show all {len(ledger)} receipts", key="receipts_show_all"):
-            shown = ledger.head(25)
-        st.dataframe(
-            shown[["Check", "Date", "Store", "Paid_By", "Total", "Items", "Difference", *ROOMMATES]],
-            hide_index=True,
-            height="content",
-            column_config={
-                "Check": st.column_config.TextColumn("", width="small"),
-                "Date": st.column_config.DateColumn("Date", format="DD.MM.YYYY"),
-                "Paid_By": st.column_config.TextColumn("Paid by"),
-                "Total": st.column_config.NumberColumn("Receipt total", format="CHF %.2f"),
-                "Items": st.column_config.NumberColumn("Items total", format="CHF %.2f"),
-                "Difference": st.column_config.NumberColumn("Difference", format="CHF %.2f"),
-                **{
-                    name: st.column_config.NumberColumn(f"{name}'s share", format="CHF %.2f")
-                    for name in ROOMMATES
-                },
-            },
-        )
-        if (ledger["Check"] == "⚠").any():
-            st.warning(
-                f"{int((ledger['Check'] == '⚠').sum())} receipt(s) have items that differ from the "
-                "printed receipt total. Open them below and correct the line items."
+        items_by_receipt = {
+            rid: _prepare_receipt_items_for_editing(group)
+            for rid, group in (
+                df_all_items.assign(Receipt_ID=df_all_items["Receipt_ID"].astype(str).str.strip())
+                .groupby("Receipt_ID")
+                if "Receipt_ID" in df_all_items.columns and not df_all_items.empty
+                else []
             )
-
-        receipt_labels = {
-            row.Receipt_ID: (
-                f"{row.Date:%d.%m.%Y}" if pd.notna(row.Date) else "Date unknown"
-            )
-            + f" · {row.Store} · {_chf(row.Total)} · paid by {row.Paid_By}"
-            for row in ledger.itertuples()
         }
-        receipt_ids = ledger["Receipt_ID"].tolist()
-        st.subheader("Receipt details" if not logged_in else "Edit a receipt")
-        selected_rid = st.selectbox(
-            "Select Receipt",
-            options=receipt_ids,
-            format_func=lambda receipt_id: receipt_labels.get(receipt_id, receipt_id),
-            key="edit_receipt_select",
+        shown = ledger
+        if period is not None:
+            shown = shown[shown["Date"].dt.to_period("M") == period]
+        if payer_filter != "Everyone":
+            shown = shown[shown["Paid_By"] == payer_filter]
+        if search:
+            def _matches(row: Any) -> bool:
+                items = items_by_receipt.get(row.Receipt_ID)
+                names = " ".join(items["Product_Name"].astype(str)) if items is not None and "Product_Name" in items else ""
+                return search in f"{row.Store} {names}".casefold()
+
+            shown = shown[[_matches(row) for row in shown.itertuples()]]
+
+        mismatched = shown[(shown["Items"] - shown["Total"]).abs() > 0.01]
+        st.markdown(
+            f"<div class='wg-list-summary'><b>{len(shown)}</b> receipt(s) · "
+            f"<b>{escape(_chf(float(shown['Total'].sum())))}</b> in total</div>",
+            unsafe_allow_html=True,
         )
+        if not mismatched.empty:
+            st.warning(
+                f"⚠️ {len(mismatched)} receipt(s) here have items that don't add up to the "
+                "printed total — open them and fix the line items."
+            )
+        if shown.empty:
+            st.info("No receipts match. Try another month or clear the search.")
 
-        if selected_rid and not logged_in:
-            guest_items = df_all_items[
-                df_all_items["Receipt_ID"].astype(str).str.strip() == selected_rid
-            ] if "Receipt_ID" in df_all_items.columns else df_all_items.iloc[0:0]
-            if guest_items.empty:
-                st.info("No items found for this receipt.")
-            else:
-                guest_view = _prepare_receipt_items_for_editing(guest_items)
-                st.dataframe(
-                    guest_view[[c for c in ["Product_Name", "Category", "Qty", "Line_Total", "Beneficiary"] if c in guest_view.columns]],
-                    hide_index=True,
-                    height="content",
-                    column_config={
-                        "Product_Name": st.column_config.TextColumn("Item"),
-                        "Qty": st.column_config.NumberColumn("Qty", format="%.3g"),
-                        "Line_Total": st.column_config.NumberColumn("Line total", format="CHF %.2f"),
-                        "Beneficiary": st.column_config.TextColumn("For"),
-                    },
+        def _start_editing(receipt_id: str) -> None:
+            st.session_state["editing_receipt"] = receipt_id
+
+        for row in shown.itertuples():
+            off = abs(row.Items - row.Total) > 0.01
+            date_text = f"{row.Date:%a %d.%m.%Y}" if pd.notna(row.Date) else "Date unknown"
+            label = (
+                f"{'⚠️ ' if off else ''}**{row.Store}** · {_chf(row.Total)}  \n"
+                f"{date_text} · paid by {row.Paid_By}"
+            )
+            with st.expander(label):
+                st.markdown(
+                    _share_chips({name: getattr(row, name) for name in ROOMMATES}),
+                    unsafe_allow_html=True,
                 )
+                if off:
+                    st.caption(
+                        f"Items add up to {_chf(row.Items)}, printed total is {_chf(row.Total)} "
+                        f"(difference {_chf(row.Items - row.Total, signed=True)})."
+                    )
+                items = items_by_receipt.get(row.Receipt_ID)
+                if items is None or items.empty:
+                    st.caption("No line items saved for this receipt.")
+                else:
+                    st.markdown(_items_html(items), unsafe_allow_html=True)
+                if logged_in:
+                    st.button(
+                        "✏️ Edit or delete",
+                        key=f"edit_receipt_{row.Receipt_ID}",
+                        on_click=_start_editing,
+                        args=(row.Receipt_ID,),
+                    )
+        if not logged_in:
             st.caption("Log in to edit or delete receipts.")
-            selected_rid = None
 
+    if breakdowns and selected_rid:
+        # ---------------- Edit view: one receipt, full width ---------------- #
+        def _back_to_list() -> None:
+            st.session_state.pop("editing_receipt", None)
+
+        st.button("← Back to all receipts", key="receipt_back", on_click=_back_to_list)
+        editing = next(b for b in breakdowns if b.receipt_id == selected_rid)
+        st.subheader(
+            f"{editing.store} · "
+            + (f"{editing.date:%d.%m.%Y}" if pd.notna(editing.date) else "date unknown")
+        )
         if selected_rid:
             try:
                 df_items = df_all_items[
@@ -1453,7 +1572,10 @@ elif selected_tab == "Past Receipts":
                                 items = clean_df.to_dict(orient="records")
                                 update_receipt(selected_rid, receipt_data, items)
                             st.toast(f"Updated receipt **{selected_rid}**", icon="✅")
-                            st.success(f"Receipt **{selected_rid}** updated successfully.")
+                            st.session_state["receipt_update_message"] = (
+                                f"Saved changes to {editing.store}."
+                            )
+                            st.session_state.pop("editing_receipt", None)
                             st.session_state.pop(items_state_key, None)
                             st.session_state[editor_version_key] = editor_version + 1
                             st.rerun()
@@ -1514,7 +1636,7 @@ elif selected_tab == "Past Receipts":
                         st.rerun()
             except Exception as exc:
                 st.error(f"Failed to load items: {exc}")
-    else:
+    if not breakdowns:
         st.info("No receipts found. Upload a receipt to get started.")
 
 
@@ -1696,49 +1818,8 @@ elif selected_tab == "Total Spendings":
     all_breakdowns = receipt_breakdowns(df_receipts, df_all_items)
 
     if all_breakdowns:
-        this_month = pd.Timestamp(date.today()).to_period("M")
-        if "spend_period" not in st.session_state:
-            st.session_state["spend_period"] = str(this_month)
-
-        def _shift_month(step: int) -> None:
-            current = st.session_state.get("spend_period", str(this_month))
-            base = this_month if current == "all" else pd.Period(current, freq="M")
-            st.session_state["spend_period"] = str(min(base + step, this_month))
-
-        def _toggle_all_time() -> None:
-            st.session_state["spend_period"] = (
-                str(this_month) if st.session_state["spend_period"] == "all" else "all"
-            )
-
-        period_value = st.session_state["spend_period"]
-        all_time = period_value == "all"
-        period = None if all_time else pd.Period(period_value, freq="M")
-        prev_col, label_col, next_col, all_col = st.columns(
-            [1, 3, 1, 1.4], vertical_alignment="center"
-        )
-        with prev_col:
-            st.button("◀ Prev", key="spend_prev", on_click=_shift_month, args=(-1,), width="stretch")
-        with label_col:
-            st.markdown(
-                f'<div class="wg-period">{"All time" if all_time else period.strftime("%B %Y")}</div>',
-                unsafe_allow_html=True,
-            )
-        with next_col:
-            st.button(
-                "Next ▶",
-                key="spend_next",
-                on_click=_shift_month,
-                args=(1,),
-                disabled=not all_time and period >= this_month,
-                width="stretch",
-            )
-        with all_col:
-            st.button(
-                "This month" if all_time else "All time",
-                key="spend_all_time",
-                on_click=_toggle_all_time,
-                width="stretch",
-            )
+        period = _month_nav("spend")
+        all_time = period is None
 
         if all_time:
             breakdowns = all_breakdowns
