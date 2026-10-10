@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0f172a" />
+    <title>Receipt Parser PWA</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./icons/icon-192.svg" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="app-header">
+        <div>
+          <h1>Receipt Parser</h1>
+          <p class="subtitle">Clean receipt overview for iOS, Android, Windows, and macOS.</p>
+        </div>
+        <div class="platforms">
+          <span class="pill">iOS</span>
+          <span class="pill">Android</span>
+          <span class="pill">Windows</span>
+          <span class="pill">macOS</span>
+        </div>
+      </header>
+
+      <section class="layout-grid">
+        <section class="card panel-input">
+          <h2>1) Upload</h2>
+          <label for="imageInput">Receipt photo</label>
+          <input id="imageInput" type="file" accept="image/*" capture="environment" />
+
+          <div class="actions">
+            <button id="parseBtn">Parse Receipt</button>
+            <button id="clearBtn" class="secondary">Clear</button>
+          </div>
+
+          <p id="statusText" class="status">Ready.</p>
+          <img id="preview" alt="Receipt preview" />
+        </section>
+
+        <section class="card panel-overview">
+          <h2>2) Overview</h2>
+          <div class="overview-grid">
+            <div class="metric">
+              <span class="metric-label">Merchant</span>
+              <strong id="merchantValue">-</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Currency</span>
+              <strong id="currencyValue">CHF</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Items</span>
+              <strong id="itemCountValue">0</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Subtotal</span>
+              <strong id="subtotalValue">CHF 0.00</strong>
+            </div>
+            <div class="metric total-metric">
+              <span class="metric-label">Total</span>
+              <strong id="totalValue">CHF 0.00</strong>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="card">
+        <h2>3) Itemized Receipt</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th>Qty</th>
+                <th>Unit Price</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody id="itemsBody">
+              <tr class="empty-row"><td colspan="4">No items parsed yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card output-grid">
+        <section>
+          <h2>Structured JSON</h2>
+          <pre id="resultJson">{}</pre>
+        </section>
+        <section>
+          <h2>Raw OCR Text</h2>
+          <pre id="ocrText">(OCR text appears here after parsing)</pre>
+        </section>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

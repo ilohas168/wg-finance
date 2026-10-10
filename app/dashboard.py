@@ -229,21 +229,41 @@ def main():
         layout="wide",
     )
 
-    st.title("🏠 Sharehouse Ledger & Expense Dashboard")
-    st.caption(
-        "Live data from your Google Sheet. Refresh the page to pull fresh data."
+    st.markdown(
+        """
+        <style>
+        .main .block-container {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+        .stMetric {
+            background: rgba(15, 23, 42, 0.7);
+            border: 1px solid rgba(148,163,184,0.25);
+            border-radius: 14px;
+            padding: 0.85rem 0.9rem;
+        }
+        div[data-testid="stMetricValue"] {
+            font-size: 1.35rem;
+            font-weight: 700;
+        }
+        .section-spacer {
+            margin-top: 0.8rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
-    # ------------------------------------------------------------------ #
-    # Balances                                                            #
-    # ------------------------------------------------------------------ #
+    st.title("🏠 Sharehouse Ledger")
+    st.caption("A clear overview of balances, spending, and recent transactions.")
+
+    st.subheader("Overview")
     balances = _cached_balances()
     col_a, col_b, col_c = st.columns(3)
 
     for col, name in zip([col_a, col_b, col_c], ROOMMATES):
         val = balances[name]
-        color = "green" if val > 0.01 else ("red" if val < -0.01 else "gray")
-        label = f"is owed CHF {val:,.2f}" if val >= 0 else f"owes CHF {abs(val):,.2f}"
+        label = f"Owed CHF {val:,.2f}" if val >= 0 else f"Owes CHF {abs(val):,.2f}"
         col.metric(
             label=name,
             value=f"CHF {val:,.2f}",
@@ -251,12 +271,11 @@ def main():
             delta_color="inverse" if val < 0 else "normal",
         )
 
-    # Settlement guidance
-    st.divider()
     advice = settlement_advice(balances)
     st.info(advice)
 
-    st.divider()
+    st.markdown('<div class="section-spacer"></div>', unsafe_allow_html=True)
+    st.subheader("Spending")
 
     # ------------------------------------------------------------------ #
     # Charts                                                              #

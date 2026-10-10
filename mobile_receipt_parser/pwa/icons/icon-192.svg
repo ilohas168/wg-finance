@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">
+  <rect width="192" height="192" rx="28" fill="#0f172a"/>
+  <rect x="38" y="24" width="116" height="144" rx="12" fill="#1e293b"/>
+  <rect x="52" y="48" width="88" height="8" rx="4" fill="#38bdf8"/>
+  <rect x="52" y="68" width="88" height="8" rx="4" fill="#94a3b8"/>
+  <rect x="52" y="88" width="72" height="8" rx="4" fill="#94a3b8"/>
+  <rect x="52" y="118" width="88" height="16" rx="8" fill="#22c55e"/>
+  <text x="96" y="130" fill="#001018" font-family="Arial,sans-serif" font-size="10" text-anchor="middle">CHF</text>
+</svg>

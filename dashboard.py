@@ -33,6 +33,40 @@ from app.services.reporting import filter_receipts_for_period, parse_receipt_dat
 
 st.set_page_config(page_title="WG Sharehouse Hub", layout="wide", page_icon="")
 
+st.markdown(
+    """
+    <style>
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    .stMetric {
+        background: rgba(15, 23, 42, 0.7);
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        border-radius: 14px;
+        padding: 0.9rem 1rem;
+        box-shadow: 0 4px 12px rgba(15, 23, 42, 0.18);
+    }
+    div[data-testid="stMetricValue"] {
+        font-size: 1.35rem;
+        font-weight: 700;
+    }
+    div[data-testid="stSidebar"] {
+        background: #0f172a;
+    }
+    .stTabs [role="tablist"] {
+        gap: 0.5rem;
+    }
+    .stTabs [role="tab"] {
+        border-radius: 9px;
+        padding: 0.5rem 0.9rem;
+        background: rgba(148,163,184,0.08);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # --------------------------------------------------------------------------- #
 # Session-state helpers                                                        #
 # --------------------------------------------------------------------------- #

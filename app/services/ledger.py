@@ -403,6 +403,20 @@ def get_all_receipts() -> pd.DataFrame:
         df = df[_RECEIPT_HEADERS + [col for col in df.columns if col not in _RECEIPT_HEADERS]]
         if "Receipt_ID" in df.columns:
             df = df[df["Receipt_ID"].astype(str).str.strip() != ""]
+        if not df.empty and "Date" in df.columns:
+            from app.services.reporting import parse_receipt_dates
+
+            df = df.assign(_receipt_sort_date=parse_receipt_dates(df["Date"]))
+            df = (
+                df.sort_values(
+                    "_receipt_sort_date",
+                    ascending=False,
+                    na_position="last",
+                    kind="stable",
+                )
+                .drop(columns="_receipt_sort_date")
+                .reset_index(drop=True)
+            )
         return df
     except Exception as e:
         logger.error(f"Error reading receipts: {e}")
