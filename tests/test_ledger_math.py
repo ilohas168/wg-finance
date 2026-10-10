@@ -230,3 +230,25 @@ def test_balances_match_a_naive_float_reimplementation():
     for person in "ABC":
         assert balances[person] == pytest.approx(expected[person] * 100, abs=1)
     assert sum(balances.values()) == 0
+
+
+def test_manual_entry_is_split_like_a_receipt():
+    from app.services.ledger_math import manual_entry_records
+
+    receipt, items = manual_entry_records(
+        "Cutlery (plates, forks, knives)", 52.0, "2026-10-10", "Shin",
+        "All (Shin, Fabian, Pierre)", "Household", entry_id="MAN-1",
+    )
+    assert receipt["Grand_Total"] == 52.0 and receipt["Paid_By"] == "Shin"
+    assert items[0]["Beneficiary"] == "ALL" and items[0]["Line_Total"] == 52.0
+    assert receipt["Notes"] == "Manual entry (no receipt)"
+
+    ledger = receipt_breakdowns(
+        pd.DataFrame([receipt]), pd.DataFrame([{**items[0], "Receipt_ID": "MAN-1"}])
+    )
+    balances = compute_balances(ledger, NO_SETTLEMENTS)
+
+    # 52 / 3 = 17.333…: the leftover cent goes to Shin's own share, so Shin
+    # is owed 34.66 and Fabian and Pierre owe 17.33 each.
+    assert balances == {"A": 3466, "B": -1733, "C": -1733}
+    assert sum(summarise_period(ledger).share.values()) == 5200
