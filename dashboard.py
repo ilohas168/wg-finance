@@ -15,11 +15,13 @@ import calendar
 import io
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from html import escape
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
 from app.services.accounting import (
     recover_legacy_weighted_quantities,
     resolve_line_item_amounts,
@@ -31,37 +33,61 @@ from app.services.reporting import filter_receipts_for_period, parse_receipt_dat
 # Page config                                                                  #
 # --------------------------------------------------------------------------- #
 
-st.set_page_config(page_title="WG Sharehouse Hub", layout="wide", page_icon="")
+st.set_page_config(page_title="WG Sharehouse Hub", layout="wide", page_icon="🏠")
 
+# Theme-neutral styling: translucent borders and washes read correctly on both
+# Streamlit's light and dark themes, so nothing here hard-codes a background.
 st.markdown(
     """
     <style>
-    .main .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
+    .block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1280px; }
+    h1 { font-weight: 750; letter-spacing: -0.02em; }
+    h2, h3 { font-weight: 650; letter-spacing: -0.01em; }
+    div[data-testid="stMetric"] {
+        border: 1px solid rgba(128, 128, 128, 0.22);
+        border-radius: 14px;
+        padding: 0.85rem 1rem;
     }
-    .stMetric {
-        background: rgba(15, 23, 42, 0.7);
-        border: 1px solid rgba(148, 163, 184, 0.25);
+    div[data-testid="stMetricValue"] { font-size: 1.4rem; font-weight: 700; }
+    .wg-hero {
+        border-radius: 18px;
+        padding: 1.4rem 1.6rem;
+        margin-bottom: 1.2rem;
+        background: linear-gradient(120deg, rgba(42,120,214,0.16), rgba(27,175,122,0.10) 60%, rgba(235,104,52,0.10));
+        border: 1px solid rgba(128, 128, 128, 0.18);
+    }
+    .wg-hero .wg-eyebrow { font-size: 0.78rem; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.65; }
+    .wg-hero .wg-title { font-size: 1.9rem; font-weight: 750; letter-spacing: -0.02em; margin: 0.15rem 0 0.25rem; }
+    .wg-hero .wg-sub { font-size: 1rem; opacity: 0.8; }
+    .wg-grid { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); margin-bottom: 1rem; }
+    .wg-card {
+        border: 1px solid rgba(128, 128, 128, 0.22);
         border-radius: 14px;
         padding: 0.9rem 1rem;
-        box-shadow: 0 4px 12px rgba(15, 23, 42, 0.18);
+        background: rgba(128, 128, 128, 0.04);
     }
-    div[data-testid="stMetricValue"] {
-        font-size: 1.35rem;
-        font-weight: 700;
+    .wg-card .wg-label { font-size: 0.8rem; opacity: 0.7; font-weight: 550; }
+    .wg-card .wg-value { font-size: 1.55rem; font-weight: 750; letter-spacing: -0.01em; margin-top: 0.15rem; }
+    .wg-card .wg-note { font-size: 0.8rem; opacity: 0.7; margin-top: 0.2rem; }
+    .wg-person { border-left: 5px solid var(--wg-accent); }
+    .wg-person-head { display: flex; align-items: center; gap: 0.6rem; }
+    .wg-avatar {
+        width: 2.1rem; height: 2.1rem; border-radius: 50%;
+        display: inline-flex; align-items: center; justify-content: center;
+        font-weight: 750; color: #fff; background: var(--wg-accent); flex-shrink: 0;
     }
-    div[data-testid="stSidebar"] {
-        background: #0f172a;
+    .wg-pill {
+        display: inline-block; font-size: 0.75rem; font-weight: 650;
+        padding: 0.12rem 0.55rem; border-radius: 999px; margin-top: 0.35rem;
+        border: 1px solid rgba(128, 128, 128, 0.3);
     }
-    .stTabs [role="tablist"] {
-        gap: 0.5rem;
-    }
-    .stTabs [role="tab"] {
-        border-radius: 9px;
-        padding: 0.5rem 0.9rem;
-        background: rgba(148,163,184,0.08);
-    }
+    .wg-pill-good { color: #0ca30c; border-color: rgba(12,163,12,0.45); background: rgba(12,163,12,0.10); }
+    .wg-pill-bad { color: #d03b3b; border-color: rgba(208,59,59,0.45); background: rgba(208,59,59,0.10); }
+    .wg-transfer { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
+    .wg-transfer .wg-who { font-weight: 600; }
+    .wg-transfer .wg-arrow { opacity: 0.55; margin: 0 0.35rem; }
+    .wg-transfer .wg-amount { font-size: 1.2rem; font-weight: 750; font-variant-numeric: tabular-nums; }
+    .wg-muted { opacity: 0.7; font-size: 0.85rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -109,7 +135,7 @@ def _init_session() -> None:
     """Ensure all required keys exist in ``st.session_state``."""
     defaults = {
         "selected_user": "Shin",
-        "current_tab": "Upload Receipt" if "logged_in_user" in st.session_state else "View History",
+        "current_tab": "Overview",
         "raw_items_df": None,
         "parsed_dict": None,
         "has_parsed": False,
@@ -127,7 +153,8 @@ _init_session()
 # --------------------------------------------------------------------------- #
 
 with st.sidebar:
-    st.title("WG Sharehouse Hub")
+    st.markdown("## 🏠 WG Sharehouse Hub")
+    st.caption("Shared receipts, fair splits, and who owes whom.")
 
     # ------------------------------------------------------------------ #
     # Login / logout                                                       #
@@ -170,7 +197,7 @@ with st.sidebar:
         with c1:
             st.success(f"Logged in as **{st.session_state.logged_in_name}**")
         with c2:
-            if st.button("Logout", use_container_width=True):
+            if st.button("Logout", width="stretch"):
                 del st.session_state.logged_in_user
                 del st.session_state.logged_in_name
                 st.rerun()
@@ -210,15 +237,26 @@ with st.sidebar:
         st.session_state["current_tab"] = "Past Receipts"
     if st.session_state.get("current_tab") == "Parent Reports":
         st.session_state["current_tab"] = "Total Spendings"
+    if st.session_state.get("current_tab") == "View History":
+        st.session_state["current_tab"] = "Overview"
     if logged_in:
-        tabs = ["Upload Receipt", "Past Receipts", "Balances & Settlements", "Total Spendings"]
+        tabs = ["Overview", "Upload Receipt", "Past Receipts", "Balances & Settlements", "Total Spendings"]
     else:
-        tabs = ["View History", "Balances & Settlements", "Total Spendings"]
+        tabs = ["Overview", "Balances & Settlements", "Total Spendings"]
+    if st.session_state.get("current_tab") not in tabs:
+        st.session_state["current_tab"] = tabs[0]
 
+    _tab_icons = {
+        "Overview": "✨",
+        "Upload Receipt": "📸",
+        "Past Receipts": "🧾",
+        "Balances & Settlements": "⚖️",
+        "Total Spendings": "📊",
+    }
     selected_tab = st.radio(
         "Page",
         options=tabs,
-        index=tabs.index(st.session_state.current_tab) if st.session_state.current_tab in tabs else 0,
+        format_func=lambda tab: f"{_tab_icons.get(tab, '')}  {tab}",
         key="current_tab",
     )
 
@@ -623,20 +661,426 @@ def _summarise_receipt(df: pd.DataFrame, header_discounts: float) -> Dict[str, f
     }
 
 
+# --------------------------------------------------------------------------- #
+# Presentation helpers — cards, ledger frames, and charts                      #
+# --------------------------------------------------------------------------- #
+
+# One fixed colour per roommate so the same person reads the same everywhere.
+_ROOMMATE_COLORS = {"Shin": "#2a78d6", "Fabian": "#eb6834", "Pierre": "#1baf7a"}
+_CODE_TO_ROOMMATE = {code: name for name, code in _ROOMMATE_INITIALS.items()}
+# Single-series charts (categories, stores) use a hue no roommate owns.
+_SINGLE_SERIES_COLOR = "#6250d6"
+_NEUTRAL_SERIES_COLOR = "#a3a29c"
+_PLOTLY_CONFIG = {"displayModeBar": False}
+
+
+def _chf(amount: float, signed: bool = False) -> str:
+    """Format a franc amount, optionally with an explicit +/− sign."""
+    if signed:
+        sign = "+" if amount > 0.004 else "−" if amount < -0.004 else ""
+        return f"{sign}CHF {abs(amount):,.2f}"
+    return f"CHF {amount:,.2f}"
+
+
+def _hero(eyebrow: str, title: str, subtitle: str) -> None:
+    """Render the page header banner."""
+    st.markdown(
+        f"""
+        <div class="wg-hero">
+          <div class="wg-eyebrow">{escape(eyebrow)}</div>
+          <div class="wg-title">{escape(title)}</div>
+          <div class="wg-sub">{escape(subtitle)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _stat_cards(cards: list[tuple[str, str, str]]) -> None:
+    """Render a responsive row of (label, value, note) stat tiles."""
+    tiles = "".join(
+        f"""<div class="wg-card"><div class="wg-label">{escape(label)}</div>
+        <div class="wg-value">{escape(value)}</div>
+        <div class="wg-note">{escape(note)}</div></div>"""
+        for label, value, note in cards
+    )
+    st.markdown(f'<div class="wg-grid">{tiles}</div>', unsafe_allow_html=True)
+
+
+def _balance_status(balance: float) -> tuple[str, str]:
+    """Return a (label, pill CSS class) pair describing a balance."""
+    if balance > 0.004:
+        return "▲ Is owed", "wg-pill wg-pill-good"
+    if balance < -0.004:
+        return "▼ Owes", "wg-pill wg-pill-bad"
+    return "● Settled", "wg-pill"
+
+
+def _balance_cards(balances: dict[str, float], highlight: Optional[str] = None) -> None:
+    """Render one card per roommate with avatar, amount, and status pill."""
+    tiles = []
+    for name in _DEFAULT_ROOMMATES:
+        balance = balances.get(name, 0.0)
+        label, pill_class = _balance_status(balance)
+        you = " · you" if name == highlight else ""
+        tiles.append(
+            f"""<div class="wg-card wg-person" style="--wg-accent:{_ROOMMATE_COLORS[name]}">
+            <div class="wg-person-head"><span class="wg-avatar">{escape(name[0])}</span>
+            <div><div class="wg-label">{escape(name)}{you}</div>
+            <div class="wg-value">{escape(_chf(abs(balance)))}</div></div></div>
+            <span class="{pill_class}">{label}</span></div>"""
+        )
+    st.markdown(f'<div class="wg-grid">{"".join(tiles)}</div>', unsafe_allow_html=True)
+
+
+def _settle_up_steps(balances_cents: dict[str, int]) -> list[dict[str, Any]]:
+    """Greedily pair debtors with creditors into the fewest transfers."""
+    debtors = [
+        [name, -balances_cents[_ROOMMATE_INITIALS[name]]]
+        for name in _DEFAULT_ROOMMATES
+        if balances_cents[_ROOMMATE_INITIALS[name]] < 0
+    ]
+    creditors = [
+        [name, balances_cents[_ROOMMATE_INITIALS[name]]]
+        for name in _DEFAULT_ROOMMATES
+        if balances_cents[_ROOMMATE_INITIALS[name]] > 0
+    ]
+    steps = []
+    debtor_index = creditor_index = 0
+    while debtor_index < len(debtors) and creditor_index < len(creditors):
+        amount_cents = min(debtors[debtor_index][1], creditors[creditor_index][1])
+        steps.append(
+            {
+                "From": debtors[debtor_index][0],
+                "To": creditors[creditor_index][0],
+                "Amount (CHF)": amount_cents / 100,
+            }
+        )
+        debtors[debtor_index][1] -= amount_cents
+        creditors[creditor_index][1] -= amount_cents
+        if debtors[debtor_index][1] == 0:
+            debtor_index += 1
+        if creditors[creditor_index][1] == 0:
+            creditor_index += 1
+    return steps
+
+
+def _transfer_card(step: dict[str, Any]) -> None:
+    """Render one suggested settlement transfer."""
+    frm, to = step["From"], step["To"]
+    st.markdown(
+        f"""<div class="wg-card wg-transfer" style="margin-bottom:0.6rem">
+        <div><span class="wg-who" style="color:{_ROOMMATE_COLORS[frm]}">{escape(frm)}</span>
+        <span class="wg-arrow">pays →</span>
+        <span class="wg-who" style="color:{_ROOMMATE_COLORS[to]}">{escape(to)}</span></div>
+        <div class="wg-amount">{escape(_chf(step["Amount (CHF)"]))}</div></div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def _receipt_ledger_frame(
+    df_receipts: pd.DataFrame, df_all_items: pd.DataFrame
+) -> pd.DataFrame:
+    """One row per receipt: parsed date, payer, total, and each roommate's share."""
+    columns = ["Receipt_ID", "Date", "Store", "Paid_By", "Total", *_DEFAULT_ROOMMATES]
+    if df_receipts.empty or "Receipt_ID" not in df_receipts.columns:
+        return pd.DataFrame(columns=columns)
+    dates = (
+        parse_receipt_dates(df_receipts["Date"])
+        if "Date" in df_receipts.columns
+        else pd.Series(pd.NaT, index=df_receipts.index)
+    )
+    rows = []
+    for (_, receipt), parsed_date in zip(df_receipts.iterrows(), dates):
+        receipt_id = str(receipt.get("Receipt_ID", "")).strip()
+        if not receipt_id:
+            continue
+        receipt_items = _receipt_items_for_view(df_all_items, receipt_id)
+        shares, allocated_cents = _receipt_spending_exact(
+            receipt_items, _money_to_cents(receipt.get("Header_Discounts", 0))
+        )
+        shares = round_shares_to_cents(shares, allocated_cents)
+        total_value = receipt.get("Grand_Total", "")
+        total_cents = (
+            _money_to_cents(total_value)
+            if total_value is not None and str(total_value).strip()
+            else allocated_cents
+        )
+        payer_code = _roommate_code(receipt.get("Paid_By"))
+        rows.append(
+            {
+                "Receipt_ID": receipt_id,
+                "Date": parsed_date,
+                "Store": str(receipt.get("Store", "") or "").strip() or "Unknown store",
+                "Paid_By": _CODE_TO_ROOMMATE.get(payer_code, str(receipt.get("Paid_By", ""))),
+                "Total": total_cents / 100,
+                **{name: shares[code] / 100 for name, code in _ROOMMATE_INITIALS.items()},
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _category_totals(df_all_items: pd.DataFrame, receipt_ids: set[str]) -> pd.Series:
+    """Sum line totals per item category for the given receipts."""
+    if df_all_items.empty or "Receipt_ID" not in df_all_items.columns:
+        return pd.Series(dtype=float)
+    items = df_all_items[
+        df_all_items["Receipt_ID"].astype(str).str.strip().isin(receipt_ids)
+    ]
+    if items.empty:
+        return pd.Series(dtype=float)
+    amounts = items.apply(_line_total_cents, axis=1) / 100
+    categories = (
+        items["Category"].fillna("").astype(str).str.strip().replace("", "General")
+        if "Category" in items.columns
+        else pd.Series("General", index=items.index)
+    )
+    totals = amounts.groupby(categories).sum()
+    return totals[totals > 0].sort_values()
+
+
+def _style_fig(fig: go.Figure, height: int = 320) -> go.Figure:
+    """Apply the shared quiet chart chrome: hairline grid, no clutter."""
+    fig.update_layout(
+        height=height,
+        margin=dict(l=8, r=8, t=36, b=8),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, title_text=""),
+        hoverlabel=dict(font_size=13),
+        bargap=0.35,
+    )
+    fig.update_xaxes(showgrid=False, zeroline=False)
+    fig.update_yaxes(gridcolor="rgba(128,128,128,0.18)", zeroline=False)
+    return fig
+
+
+def _show_fig(fig: go.Figure) -> None:
+    st.plotly_chart(fig, config=_PLOTLY_CONFIG)
+
+
+def _balance_chart(balances: dict[str, float]) -> go.Figure:
+    """Diverging horizontal bars: right of zero is owed, left of zero owes."""
+    names = list(reversed(_DEFAULT_ROOMMATES))
+    values = [balances.get(name, 0.0) for name in names]
+    fig = go.Figure(
+        go.Bar(
+            x=values,
+            y=names,
+            orientation="h",
+            marker=dict(color=[_ROOMMATE_COLORS[n] for n in names], cornerradius=4),
+            text=[_chf(v, signed=True) for v in values],
+            textposition="outside",
+            cliponaxis=False,
+            hovertemplate="%{y}: %{text}<extra></extra>",
+        )
+    )
+    limit = max([abs(v) for v in values] + [1.0]) * 1.35
+    fig.add_vline(x=0, line_width=1, line_color="rgba(128,128,128,0.6)")
+    fig.update_xaxes(range=[-limit, limit], showticklabels=False)
+    _style_fig(fig, height=220)
+    fig.update_yaxes(showgrid=False)
+    fig.update_layout(margin=dict(l=8, r=8, t=8, b=8))
+    return fig
+
+
+def _monthly_chart(ledger: pd.DataFrame, months: int = 12) -> Optional[go.Figure]:
+    """Stacked monthly bars of each roommate's allocated share."""
+    dated = ledger.dropna(subset=["Date"])
+    if dated.empty:
+        return None
+    period = dated["Date"].dt.to_period("M")
+    end = max(period.max(), pd.Timestamp(date.today()).to_period("M"))
+    start = max(period.min(), end - (months - 1))
+    month_index = pd.period_range(start, end, freq="M")
+    monthly = (
+        dated.groupby(period)[_DEFAULT_ROOMMATES].sum().reindex(month_index, fill_value=0)
+    )
+    labels = [p.strftime("%b %Y") for p in month_index]
+    fig = go.Figure()
+    for name in _DEFAULT_ROOMMATES:
+        fig.add_bar(
+            x=labels,
+            y=monthly[name],
+            name=name,
+            marker=dict(color=_ROOMMATE_COLORS[name]),
+            hovertemplate=f"{name}: CHF %{{y:,.2f}}<extra>%{{x}}</extra>",
+        )
+    totals = monthly.sum(axis=1)
+    fig.add_scatter(
+        x=labels,
+        y=totals,
+        mode="text",
+        text=[f"{t:,.0f}" if t else "" for t in totals],
+        textposition="top center",
+        showlegend=False,
+        hoverinfo="skip",
+    )
+    fig.update_layout(barmode="stack", legend_traceorder="normal")
+    fig.update_yaxes(title_text="CHF", rangemode="tozero")
+    return _style_fig(fig, height=340)
+
+
+def _hbar_chart(totals: pd.Series, height: Optional[int] = None) -> go.Figure:
+    """Single-series horizontal bar chart for category or store totals."""
+    fig = go.Figure(
+        go.Bar(
+            x=totals.values,
+            y=[str(i) for i in totals.index],
+            orientation="h",
+            marker=dict(color=_SINGLE_SERIES_COLOR, cornerradius=4),
+            text=[f"{v:,.2f}" for v in totals.values],
+            textposition="outside",
+            cliponaxis=False,
+            hovertemplate="%{y}: CHF %{x:,.2f}<extra></extra>",
+        )
+    )
+    fig.update_xaxes(showticklabels=False, range=[0, float(totals.max() or 1) * 1.25])
+    _style_fig(fig, height=height or max(180, 44 * len(totals) + 40))
+    fig.update_yaxes(showgrid=False)
+    fig.update_layout(margin=dict(l=8, r=8, t=8, b=8))
+    return fig
+
+
+def _load_ledger_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load receipts, line items, and settlements, degrading to empty frames."""
+    try:
+        with st.spinner("Loading the ledger…"):
+            from app.services.ledger import get_all_receipts, get_receipt_items, get_settlements  # type: ignore
+
+            return get_all_receipts(), get_receipt_items(), get_settlements()
+    except Exception as exc:
+        st.error(f"Failed to load data: {exc}")
+        return (
+            pd.DataFrame(columns=["Receipt_ID", "Date", "Store", "Paid_By"]),
+            pd.DataFrame(columns=["Receipt_ID", "Line_Total", "Beneficiary"]),
+            pd.DataFrame(columns=["Settlement_ID", "Date", "From_Roommate", "To_Roommate", "Amount", "Method"]),
+        )
+
+
+# =========================================================================== #
+# Overview                                                                     #
+# =========================================================================== #
+
+if selected_tab == "Overview":
+    df_receipts, df_all_items, df_settlements = _load_ledger_data()
+    today = date.today()
+    you = selected_user
+
+    ledger = _receipt_ledger_frame(df_receipts, df_all_items)
+    if ledger.empty:
+        _hero(today.strftime("%A, %d %B %Y"), f"Hi {you} 👋", "No receipts yet — upload one to get the ledger going.")
+        st.stop()
+
+    balances_cents = _calculate_balance_cents(df_receipts, df_all_items, df_settlements, you)
+    balances = {name: balances_cents[code] / 100 for name, code in _ROOMMATE_INITIALS.items()}
+    your_balance = balances[you]
+    if your_balance > 0.004:
+        mood = f"Your roommates owe you {_chf(your_balance)}."
+    elif your_balance < -0.004:
+        mood = f"You owe {_chf(abs(your_balance))} — see Settle up below."
+    else:
+        mood = "You're all square. Nice."
+    _hero(today.strftime("%A, %d %B %Y"), f"Hi {you} 👋", mood)
+
+    month_period = pd.Timestamp(today).to_period("M")
+    ledger_period = ledger["Date"].dt.to_period("M")
+    this_month = ledger[ledger_period == month_period]
+    last_month = ledger[ledger_period == month_period - 1]
+    this_total = float(this_month["Total"].sum())
+    last_total = float(last_month["Total"].sum())
+    last_name = (month_period - 1).strftime("%B")
+    if last_total > 0:
+        change = (this_total - last_total) / last_total * 100
+        trend_note = f"{'▲' if change >= 0 else '▼'} {abs(change):.0f}% vs {last_name} ({_chf(last_total)})"
+    else:
+        trend_note = f"Nothing recorded in {last_name}"
+    your_share = float(this_month[you].sum())
+    share_pct = f"{your_share / this_total * 100:.0f}% of household spending" if this_total else "No spending yet this month"
+    paid_by_you = int((this_month["Paid_By"] == you).sum())
+    first_date = ledger["Date"].min()
+    _stat_cards(
+        [
+            (f"Spent in {today:%B}", _chf(this_total), trend_note),
+            ("Your share this month", _chf(your_share), share_pct),
+            ("Receipts this month", f"{len(this_month)}", f"{paid_by_you} paid by you"),
+            (
+                "All-time spending",
+                _chf(float(ledger["Total"].sum())),
+                f"{len(ledger)} receipts since {first_date:%b %Y}" if pd.notna(first_date) else f"{len(ledger)} receipts",
+            ),
+        ]
+    )
+
+    bal_col, settle_col = st.columns([3, 2], gap="large")
+    with bal_col:
+        st.subheader("Balances")
+        st.caption("Right of the line: others owe them. Left: they owe others.")
+        _show_fig(_balance_chart(balances))
+    with settle_col:
+        st.subheader("Settle up")
+        steps = _settle_up_steps(balances_cents)
+        if steps:
+            st.caption("The fewest transfers that square everyone up.")
+            for step in steps:
+                _transfer_card(step)
+        else:
+            st.success("Everyone is settled up! 🎉")
+
+    st.subheader("Monthly spending")
+    st.caption("Each bar is a month; segments show each roommate's share of the items bought.")
+    monthly_fig = _monthly_chart(ledger)
+    if monthly_fig is not None:
+        _show_fig(monthly_fig)
+
+    cat_col, recent_col = st.columns(2, gap="large")
+    with cat_col:
+        category_scope = this_month if not this_month.empty else ledger
+        st.subheader("Where the money goes")
+        st.caption(
+            f"Item categories in {today:%B}." if not this_month.empty
+            else "Item categories, all time (nothing recorded this month yet)."
+        )
+        category_totals = _category_totals(df_all_items, set(category_scope["Receipt_ID"]))
+        if category_totals.empty:
+            st.info("No categorised items yet.")
+        else:
+            _show_fig(_hbar_chart(category_totals))
+    with recent_col:
+        st.subheader("Recent receipts")
+        st.caption("The latest purchases logged to the ledger.")
+        recent = ledger.sort_values("Date", ascending=False, na_position="last").head(8)
+        st.dataframe(
+            recent[["Date", "Store", "Paid_By", "Total"]],
+            hide_index=True,
+            column_config={
+                "Date": st.column_config.DateColumn("Date", format="DD.MM.YYYY"),
+                "Paid_By": st.column_config.TextColumn("Paid by"),
+                "Total": st.column_config.NumberColumn("Total", format="CHF %.2f"),
+            },
+        )
+
+
 # =========================================================================== #
 # Tab 1 — Upload Receipt                                                     #
 # =========================================================================== #
 
-if selected_tab == "Upload Receipt":
-    st.title("Upload Receipt")
+elif selected_tab == "Upload Receipt":
+    st.title("📸 Upload Receipt")
     st.caption("Send a receipt photo, edit line-items, and save to the shared ledger.")
 
-    uploaded_file = st.file_uploader("Upload receipt image", type=["png", "jpg", "jpeg"], key="file_uploader")
-    image_bytes: Optional[bytes] = uploaded_file.getvalue() if uploaded_file is not None else None
-
-    col_parse, _ = st.columns([1, 5])
-    with col_parse:
-        parse_clicked = st.button("Parse Receipt", type="primary", key="parse_btn")
+    upload_col, preview_col = st.columns([3, 1], gap="large")
+    with upload_col:
+        uploaded_file = st.file_uploader("Upload receipt image", type=["png", "jpg", "jpeg"], key="file_uploader")
+        image_bytes: Optional[bytes] = uploaded_file.getvalue() if uploaded_file is not None else None
+        parse_clicked = st.button(
+            "✨ Parse Receipt", type="primary", key="parse_btn", disabled=image_bytes is None
+        )
+    with preview_col:
+        if image_bytes:
+            st.image(image_bytes, caption="Receipt preview", width="stretch")
+        else:
+            st.caption("📷 A sharp, flat photo with the totals visible parses best.")
 
     if parse_clicked and image_bytes:
         try:
@@ -830,7 +1274,7 @@ if selected_tab == "Upload Receipt":
 # =========================================================================== #
 
 elif selected_tab == "Past Receipts":
-    st.title("Past Receipts")
+    st.title("🧾 Past Receipts")
     st.caption("Review receipt totals and each roommate's allocated spending; edit or delete receipts.")
     if st.session_state.pop("clear_edit_receipt_select", False):
         st.session_state.pop("edit_receipt_select", None)
@@ -879,7 +1323,7 @@ elif selected_tab == "Past Receipts":
             st.dataframe(
                 pd.DataFrame(summary_rows),
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 column_config={
                     column: st.column_config.NumberColumn(column, format="%.2f")
                     for column in [
@@ -1125,24 +1569,13 @@ elif selected_tab == "Past Receipts":
 # =========================================================================== #
 
 elif selected_tab == "Balances & Settlements":
-    st.title("Balances & Settlements")
+    st.title("⚖️ Balances & Settlements")
     st.caption("Positive means others owe that roommate; negative means they owe others. Settlements reduce both sides.")
     settlement_message = st.session_state.pop("settlement_message", None)
     if settlement_message:
         st.success(settlement_message)
 
-    try:
-        with st.spinner("Loading data…"):
-            from app.services.ledger import get_all_receipts, get_receipt_items, get_settlements  # type: ignore
-
-            df_receipts = get_all_receipts()
-            df_all_items = get_receipt_items()
-            df_settlements = get_settlements()
-    except Exception as exc:
-        st.error(f"Failed to load data: {exc}")
-        df_receipts = pd.DataFrame(columns=["Receipt_ID", "Date", "Store", "Paid_By"])
-        df_all_items = pd.DataFrame(columns=["Receipt_ID", "Line_Total", "Beneficiary"])
-        df_settlements = pd.DataFrame(columns=["Settlement_ID", "Date", "From_Roommate", "To_Roommate", "Amount", "Method"])
+    df_receipts, df_all_items, df_settlements = _load_ledger_data()
 
     if not df_receipts.empty and "Receipt_ID" in df_receipts.columns:
         balances_cents = _calculate_balance_cents(
@@ -1160,60 +1593,38 @@ elif selected_tab == "Balances & Settlements":
                 f"Unallocated difference: CHF {abs(unallocated_cents) / 100:,.2f}."
             )
 
-        # Display balance metrics
-        st.subheader("Current Balances")
-        bal_cols = st.columns(len(_DEFAULT_ROOMMATES))
-        for col, rm in zip(bal_cols, _DEFAULT_ROOMMATES):
-            with col:
-                val = balances.get(rm, 0.0)
-                status = "green" if val > 0 else "red" if val < -0.01 else "gray"
-                st.metric(
-                    rm,
-                    f"CHF {abs(val):,.2f}",
-                    delta=f"{'Owes' if val < -0.01 else 'Is owed' if val > 0.01 else 'Settled'}",
-                    delta_color="inverse" if val < 0 else "normal",
-                )
+        st.subheader("Current balances")
+        _balance_cards(balances, highlight=selected_user)
 
-        # Who-owes-whom matrix
-        st.subheader("Who Owes Whom")
-        owes_rows = []
-        debtors = [
-            [name, -balances_cents[_ROOMMATE_INITIALS[name]]]
-            for name in _DEFAULT_ROOMMATES
-            if balances_cents[_ROOMMATE_INITIALS[name]] < 0
-        ]
-        creditors = [
-            [name, balances_cents[_ROOMMATE_INITIALS[name]]]
-            for name in _DEFAULT_ROOMMATES
-            if balances_cents[_ROOMMATE_INITIALS[name]] > 0
-        ]
-        debtor_index = creditor_index = 0
-        while debtor_index < len(debtors) and creditor_index < len(creditors):
-            amount_cents = min(
-                debtors[debtor_index][1], creditors[creditor_index][1]
-            )
-            owes_rows.append(
-                {
-                    "From": debtors[debtor_index][0],
-                    "To": creditors[creditor_index][0],
-                    "Amount (CHF)": amount_cents / 100,
-                }
-            )
-            debtors[debtor_index][1] -= amount_cents
-            creditors[creditor_index][1] -= amount_cents
-            if debtors[debtor_index][1] == 0:
-                debtor_index += 1
-            if creditors[creditor_index][1] == 0:
-                creditor_index += 1
+        chart_col, steps_col = st.columns([3, 2], gap="large")
+        with chart_col:
+            st.caption("Right of the line: others owe them. Left: they owe others.")
+            _show_fig(_balance_chart(balances))
+        with steps_col:
+            st.subheader("Who owes whom")
+            owes_rows = _settle_up_steps(balances_cents)
+            if owes_rows:
+                st.caption("Suggested transfers — tap one to prefill the form below.")
 
-        if owes_rows:
-            df_owes = pd.DataFrame(owes_rows)
-            st.dataframe(df_owes, hide_index=True, use_container_width=True)
-        else:
-            st.info("Everyone is settled up! 🎉")
+                def _prefill_settlement(step: dict[str, Any]) -> None:
+                    st.session_state["settlement_from"] = step["From"]
+                    st.session_state["settlement_to"] = step["To"]
+                    st.session_state["settlement_amount"] = float(step["Amount (CHF)"])
+
+                for index, step in enumerate(owes_rows):
+                    _transfer_card(step)
+                    st.button(
+                        f"Use {step['From']} → {step['To']}",
+                        key=f"prefill_settlement_{index}",
+                        on_click=_prefill_settlement,
+                        args=(step,),
+                    )
+            else:
+                st.success("Everyone is settled up! 🎉")
 
         # Settlement form
-        st.subheader("Log Settlement")
+        st.divider()
+        st.subheader("Log a settlement")
         st.caption("From is the roommate paying; To is the roommate receiving the payment.")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -1238,6 +1649,32 @@ elif selected_tab == "Balances & Settlements":
                 except Exception as exc:
                     st.error(f"Error logging settlement: {str(exc)}")
 
+        st.subheader("Settlement history")
+        if df_settlements.empty:
+            st.caption("No settlements logged yet.")
+        else:
+            history = df_settlements.copy()
+            if "Amount" in history.columns:
+                history["Amount"] = pd.to_numeric(history["Amount"], errors="coerce")
+            if "Date" in history.columns:
+                history["Date"] = parse_receipt_dates(history["Date"])
+                history = history.sort_values("Date", ascending=False, na_position="last")
+            history_columns = [
+                column
+                for column in ["Date", "From_Roommate", "To_Roommate", "Amount", "Method"]
+                if column in history.columns
+            ]
+            st.dataframe(
+                history[history_columns],
+                hide_index=True,
+                column_config={
+                    "Date": st.column_config.DateColumn("Date", format="DD.MM.YYYY"),
+                    "From_Roommate": st.column_config.TextColumn("From"),
+                    "To_Roommate": st.column_config.TextColumn("To"),
+                    "Amount": st.column_config.NumberColumn("Amount", format="CHF %.2f"),
+                },
+            )
+
     else:
         st.info("No receipts found. Upload a receipt to start tracking balances.")
 
@@ -1247,7 +1684,7 @@ elif selected_tab == "Balances & Settlements":
 # =========================================================================== #
 
 elif selected_tab == "Total Spendings":
-    st.title("Total Spendings")
+    st.title("📊 Total Spendings")
     st.caption(
         "Compare what each roommate paid with their share of spending for a month or all time."
     )
@@ -1375,7 +1812,7 @@ elif selected_tab == "Total Spendings":
         st.dataframe(
             pd.DataFrame(summary_rows),
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             column_config={
                 column: st.column_config.NumberColumn(column, format="%.2f")
                 for column in [
@@ -1385,13 +1822,57 @@ elif selected_tab == "Total Spendings":
             },
         )
 
+        period_ids = set(df_period["Receipt_ID"].astype(str).str.strip())
+        paid_col, cat_col = st.columns(2, gap="large")
+        with paid_col:
+            st.markdown("**Paid at checkout vs. share of items**")
+            fig_paid = go.Figure()
+            fig_paid.add_bar(
+                x=_DEFAULT_ROOMMATES,
+                y=[paid_cents_by_person[_ROOMMATE_INITIALS[n]] / 100 for n in _DEFAULT_ROOMMATES],
+                name="Paid at checkout",
+                marker=dict(color=_SINGLE_SERIES_COLOR, cornerradius=4),
+                hovertemplate="%{x} paid CHF %{y:,.2f}<extra></extra>",
+            )
+            fig_paid.add_bar(
+                x=_DEFAULT_ROOMMATES,
+                y=[allocated_cents_by_person[_ROOMMATE_INITIALS[n]] / 100 for n in _DEFAULT_ROOMMATES],
+                name="Share of items",
+                marker=dict(color=_NEUTRAL_SERIES_COLOR, cornerradius=4),
+                hovertemplate="%{x}'s share CHF %{y:,.2f}<extra></extra>",
+            )
+            fig_paid.update_layout(barmode="group", bargroupgap=0.08)
+            fig_paid.update_yaxes(title_text="CHF", rangemode="tozero")
+            _show_fig(_style_fig(fig_paid))
+        with cat_col:
+            st.markdown("**Spending by category**")
+            period_categories = _category_totals(df_all_items, period_ids)
+            if period_categories.empty:
+                st.info("No categorised items in this period.")
+            else:
+                _show_fig(_hbar_chart(period_categories, height=320))
+
+        if not df_period.empty and "Store" in df_period.columns:
+            store_totals = (
+                pd.DataFrame(detail_rows)
+                .assign(Store=lambda d: d["Store"].astype(str).str.strip().replace("", "Unknown store"))
+                .groupby("Store")["Receipt Total (CHF)"]
+                .sum()
+                .sort_values()
+                .tail(8)
+            )
+            store_totals = store_totals[store_totals > 0]
+            if not store_totals.empty:
+                st.markdown("**Top stores**")
+                _show_fig(_hbar_chart(store_totals))
+
         st.subheader("Receipts in selected period")
         details_df = pd.DataFrame(detail_rows)
         if not details_df.empty:
             st.dataframe(
                 details_df,
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 column_config={
                     column: st.column_config.NumberColumn(column, format="%.2f")
                     for column in ["Receipt Total (CHF)"]
