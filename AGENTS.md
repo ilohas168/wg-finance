@@ -51,6 +51,7 @@ app/
 └── services/
     ├── vision.py        # Groq Llama 3.2 Vision receipt parsing
     ├── ledger.py        # Split engine + Google Sheets integration
+    ├── ledger_math.py   # Balance/share/report maths used by the dashboard (cents, tested)
     └── telegram.py      # Telegram Bot API helpers (send, download, webhook reg)
 tests/
 ├── __init__.py
