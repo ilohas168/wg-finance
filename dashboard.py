@@ -1209,23 +1209,32 @@ elif selected_tab == "Past Receipts":
                 )
                 share_cols = st.columns(5)
                 with share_cols[0]:
-                    st.metric(
-                        "Receipt Total",
-                        f"CHF {money_to_cents(selected_receipt.get('Grand_Total', 0)) / 100:,.2f}",
+                    # The printed total is what the payer actually paid, so it is
+                    # stored as entered and never derived from the line items.
+                    printed_total = st.number_input(
+                        "Printed receipt total (CHF)",
+                        value=money_to_cents(selected_receipt.get("Grand_Total", 0)) / 100,
+                        step=0.01,
+                        format="%.2f",
+                        key=f"receipt_total_{selected_rid}",
+                        help="What the payer paid at the till. Saved with Update Receipt.",
                     )
                 with share_cols[1]:
-                    st.metric("Allocated Total", f"CHF {sum(selected_shares.values()) / 100:,.2f}")
+                    st.metric("Items total", _chf(sum(selected_shares.values()) / 100))
                 for col, name, code in zip(share_cols[2:], ROOMMATES, "ABC"):
                     with col:
-                        st.metric(f"{name}'s Share", f"CHF {selected_shares[code] / 100:,.2f}")
-                selected_difference = sum(selected_shares.values()) - money_to_cents(
-                    selected_receipt.get("Grand_Total", 0)
-                )
+                        st.metric(f"{name}'s share", _chf(selected_shares[code] / 100))
+                selected_difference = sum(selected_shares.values()) - money_to_cents(printed_total)
                 if abs(selected_difference) > 1:
                     st.warning(
-                        "Allocated item shares differ from the receipt total by "
-                        f"CHF {selected_difference / 100:,.2f}. Correct the line items before saving."
+                        f"The items add up to {_chf(sum(selected_shares.values()) / 100)}, "
+                        f"{_chf(abs(selected_difference) / 100)} "
+                        f"{'more' if selected_difference > 0 else 'less'} than the printed total. "
+                        "The payer is credited the printed total, so balances won't net to zero "
+                        "until the line items (or a misread total) are corrected."
                     )
+                else:
+                    st.success("Items match the printed total. ✓")
 
                 current_date = parse_receipt_dates(
                     pd.Series([selected_receipt.get("Date", "")])
@@ -1322,10 +1331,7 @@ elif selected_tab == "Past Receipts":
                                     "Store": selected_receipt.get("Store", ""),
                                     "Paid_By": edited_payer,
                                     "Header_Discounts": money_to_cents(selected_receipt.get("Header_Discounts", 0)) / 100,
-                                    "Grand_Total": _summarise_receipt(
-                                        edited_df,
-                                        money_to_cents(selected_receipt.get("Header_Discounts", 0)) / 100,
-                                    )["grand_total"],
+                                    "Grand_Total": money_to_cents(printed_total) / 100,
                                     "Shared_Total": _summarise_receipt(
                                         edited_df,
                                         money_to_cents(selected_receipt.get("Header_Discounts", 0)) / 100,
