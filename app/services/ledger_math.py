@@ -372,3 +372,49 @@ def category_totals_cents(
             exact[category] = exact.get(category, Decimal(0)) + amount
         total += breakdown.allocated_cents
     return round_shares_to_cents(exact, total) if exact else {}
+
+
+def manual_entry_records(
+    description: str,
+    amount: float,
+    entry_date: str,
+    payer: str,
+    beneficiary: str,
+    category: str = "General",
+    note: str = "",
+    entry_id: str = "",
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build the receipt row and single line item for a payment with no receipt.
+
+    The entry is stored like a one-line receipt, so balances and reports treat
+    it exactly like scanned receipts: the payer is credited ``amount`` and it
+    is split evenly between the chosen beneficiaries.
+    """
+    code = beneficiary_code(beneficiary)
+    amount = money_to_cents(amount) / 100
+    split_type = "Shared" if code == "ALL" or len(code) > 1 else "Private"
+    notes = "Manual entry (no receipt)" + (f": {note.strip()}" if note.strip() else "")
+    receipt = {
+        "Receipt_ID": entry_id,
+        "Date": entry_date,
+        "Store": description.strip(),
+        "Paid_By": payer,
+        "Header_Discounts": 0.0,
+        "Grand_Total": amount,
+        "Shared_Total": amount if split_type == "Shared" else 0.0,
+        "Notes": notes,
+    }
+    item = {
+        "Date": entry_date,
+        "Store": description.strip(),
+        "Paid_By": payer,
+        "Product_Name": description.strip(),
+        "Category": category,
+        "Qty": 1.0,
+        "Unit_Price": amount,
+        "Discount": 0.0,
+        "Line_Total": amount,
+        "Split_Type": split_type,
+        "Beneficiary": code,
+    }
+    return receipt, [item]

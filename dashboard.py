@@ -12,7 +12,6 @@ Pages (top tab bar; maths lives in ``app/services/ledger_math.py``):
 
 from __future__ import annotations
 
-import calendar
 from datetime import date, datetime
 from html import escape
 from typing import Any, Dict, Optional
@@ -24,6 +23,7 @@ import streamlit as st
 from app.services.accounting import (
     recover_legacy_weighted_quantities,
     resolve_line_item_amounts,
+    round_shares_to_cents,
 )
 from app.services.ledger_math import (
     BENEFICIARY_LABELS,
@@ -106,6 +106,9 @@ st.markdown(
     .wg-transfer .wg-arrow { opacity: 0.55; margin: 0 0.35rem; }
     .wg-transfer .wg-amount { font-size: 1.2rem; font-weight: 750; font-variant-numeric: tabular-nums; }
     .wg-muted { opacity: 0.7; font-size: 0.85rem; }
+    .wg-period { text-align: center; font-size: 1.35rem; font-weight: 750; }
+    .wg-split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.7rem; }
+    .wg-split .wg-value { font-size: 1.25rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -389,6 +392,7 @@ def _edit_line_items_inline(items: pd.DataFrame, editor_key: str) -> pd.DataFram
         hide_index=True,
         num_rows="fixed",
         width="stretch",
+        height="content",
         key=editor_key,
     )
 
@@ -501,7 +505,9 @@ _ROOMMATE_COLORS = {"Shin": "#2a78d6", "Fabian": "#eb6834", "Pierre": "#1baf7a"}
 # Single-series charts (categories, stores) use a hue no roommate owns.
 _SINGLE_SERIES_COLOR = "#6250d6"
 _NEUTRAL_SERIES_COLOR = "#a3a29c"
-_PLOTLY_CONFIG = {"displayModeBar": False}
+# Charts are read-only: no zoom, pan, or scroll capture, so swiping or
+# scrolling over a chart always scrolls the page (tooltips still work).
+_PLOTLY_CONFIG = {"displayModeBar": False, "scrollZoom": False, "doubleClick": False}
 
 
 def _chf(amount: float, signed: bool = False) -> str:
@@ -589,9 +595,10 @@ def _style_fig(fig: go.Figure, height: int = 320) -> go.Figure:
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, title_text=""),
         hoverlabel=dict(font_size=13),
         bargap=0.35,
+        dragmode=False,
     )
-    fig.update_xaxes(showgrid=False, zeroline=False)
-    fig.update_yaxes(gridcolor="rgba(128,128,128,0.18)", zeroline=False)
+    fig.update_xaxes(showgrid=False, zeroline=False, fixedrange=True)
+    fig.update_yaxes(gridcolor="rgba(128,128,128,0.18)", zeroline=False, fixedrange=True)
     return fig
 
 
@@ -627,18 +634,22 @@ def _balance_chart(balances: dict[str, float]) -> go.Figure:
 
 def _ledger_frame(breakdowns: list[ReceiptBreakdown]) -> pd.DataFrame:
     """One row per receipt for charts and tables, newest first."""
-    rows = [
-        {
-            "Receipt_ID": b.receipt_id,
-            "Date": b.date,
-            "Store": b.store,
-            "Paid_By": b.payer or (f"⚠ {b.raw_payer}" if b.raw_payer else "⚠ unknown"),
-            "Total": b.paid_cents / 100,
-            "Items": b.allocated_cents / 100,
-            **{name: float(b.exact_shares[code]) / 100 for name, code in ROOMMATE_CODES.items()},
-        }
-        for b in breakdowns
-    ]
+    rows = []
+    for b in breakdowns:
+        # Rounded per receipt so each row's shares add up to its items total.
+        shares = round_shares_to_cents(b.exact_shares, b.allocated_cents)
+        rows.append(
+            {
+                "Receipt_ID": b.receipt_id,
+                "Date": b.date,
+                # Payments entered without a receipt are marked so they stand out.
+                "Store": f"✍️ {b.store}" if b.receipt_id.startswith("MAN-") else b.store,
+                "Paid_By": b.payer or (f"⚠ {b.raw_payer}" if b.raw_payer else "⚠ unknown"),
+                "Total": b.paid_cents / 100,
+                "Items": b.allocated_cents / 100,
+                **{name: shares[code] / 100 for name, code in ROOMMATE_CODES.items()},
+            }
+        )
     frame = pd.DataFrame(
         rows,
         columns=["Receipt_ID", "Date", "Store", "Paid_By", "Total", "Items", *ROOMMATES],
@@ -649,7 +660,7 @@ def _ledger_frame(breakdowns: list[ReceiptBreakdown]) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
-def _receipts_table(frame: pd.DataFrame, with_shares: bool = False, height: Any = "auto") -> None:
+def _receipts_table(frame: pd.DataFrame, with_shares: bool = False, height: Any = "content") -> None:
     """Show receipts newest first with the date, store, payer, and total."""
     columns = ["Date", "Store", "Paid_By", "Total"]
     config = {
@@ -879,7 +890,104 @@ if selected_tab == "Overview":
 # =========================================================================== #
 
 elif selected_tab == "Upload Receipt":
-    st.title("📸 Upload Receipt")
+    st.title("📸 Upload")
+    upload_mode = st.segmented_control(
+        "What are you adding?",
+        ["📷 Scan a receipt", "✍️ Payment without receipt"],
+        required=True,
+        default="📷 Scan a receipt",
+        key="upload_mode",
+    )
+
+    if upload_mode == "✍️ Payment without receipt":
+        st.caption(
+            "For things bought without a receipt (e.g. cutlery, a deposit, a Twint payment). "
+            "It counts exactly like a receipt: the payer is credited and the amount is split."
+        )
+        manual_message = st.session_state.pop("manual_entry_message", None)
+        if manual_message:
+            st.success(manual_message)
+
+        def _save_manual_entry() -> None:
+            description = st.session_state.get("manual_description", "").strip()
+            amount = float(st.session_state.get("manual_amount") or 0)
+            if not description or amount <= 0:
+                st.session_state["manual_entry_error"] = "Add a description and an amount above 0."
+                return
+            from app.services.ledger import save_receipt  # type: ignore
+            from app.services.ledger_math import manual_entry_records
+
+            receipt_data, items = manual_entry_records(
+                description,
+                amount,
+                st.session_state["manual_date"].isoformat(),
+                st.session_state["manual_payer"],
+                st.session_state["manual_beneficiary"],
+                st.session_state["manual_category"],
+                st.session_state.get("manual_note", ""),
+                entry_id=f"MAN-{datetime.now():%Y%m%d-%H%M%S}",
+            )
+            try:
+                save_receipt(receipt_data, items)
+            except Exception as exc:  # surfaced on the next run
+                st.session_state["manual_entry_error"] = f"Error saving to Sheets: {exc}"
+                return
+            st.session_state["manual_entry_message"] = (
+                f"Saved {_chf(receipt_data['Grand_Total'])} for “{description}”, "
+                f"paid by {receipt_data['Paid_By']}."
+            )
+            for key in ("manual_description", "manual_amount", "manual_note"):
+                st.session_state.pop(key, None)
+
+        desc_col, amount_col = st.columns([2, 1])
+        with desc_col:
+            st.text_input(
+                "What was it for?",
+                placeholder="e.g. Cutlery — plates, forks, knives",
+                key="manual_description",
+            )
+        with amount_col:
+            manual_amount = st.number_input(
+                "Amount (CHF)", min_value=0.0, step=0.05, format="%.2f", key="manual_amount"
+            )
+        date_col, payer_col, split_col, cat_col = st.columns(4)
+        with date_col:
+            st.date_input("Date", value=date.today(), key="manual_date", format="DD.MM.YYYY")
+        with payer_col:
+            st.selectbox(
+                "Paid by",
+                ROOMMATES,
+                index=ROOMMATES.index(current_user) if current_user in ROOMMATES else 0,
+                key="manual_payer",
+            )
+        with split_col:
+            manual_beneficiary = st.selectbox(
+                "Shared between", list(BENEFICIARY_LABELS.values()), key="manual_beneficiary"
+            )
+        with cat_col:
+            st.selectbox(
+                "Category",
+                ["Household", "Food", "Drink", "Toiletries", "General"],
+                key="manual_category",
+            )
+        st.text_input("Note (optional)", key="manual_note")
+
+        if manual_amount > 0:
+            people = [CODE_TO_ROOMMATE[c] for c in "ABC" if c in beneficiary_code(manual_beneficiary)] \
+                if beneficiary_code(manual_beneficiary) != "ALL" else ROOMMATES
+            preview = receipt_spending_cents(
+                pd.DataFrame([{"Line_Total": manual_amount, "Beneficiary": manual_beneficiary}])
+            )
+            st.info(
+                "Each person's share: "
+                + " · ".join(f"{name} {_chf(preview[ROOMMATE_CODES[name]] / 100)}" for name in people)
+            )
+        st.button("Save payment", type="primary", key="manual_save", on_click=_save_manual_entry)
+        manual_error = st.session_state.pop("manual_entry_error", None)
+        if manual_error:
+            st.error(manual_error)
+        st.stop()
+
     st.caption("Send a receipt photo, edit line-items, and save to the shared ledger.")
 
     upload_col, preview_col = st.columns([3, 1], gap="large")
@@ -1127,9 +1235,13 @@ elif selected_tab == "Past Receipts":
             "Newest first. Shares are each roommate's part of the items; ⚠ marks receipts "
             "whose items don't add up to the printed total."
         )
+        shown = ledger
+        if len(ledger) > 25 and not st.toggle(f"Show all {len(ledger)} receipts", key="receipts_show_all"):
+            shown = ledger.head(25)
         st.dataframe(
-            ledger[["Check", "Date", "Store", "Paid_By", "Total", "Items", "Difference", *ROOMMATES]],
+            shown[["Check", "Date", "Store", "Paid_By", "Total", "Items", "Difference", *ROOMMATES]],
             hide_index=True,
+            height="content",
             column_config={
                 "Check": st.column_config.TextColumn("", width="small"),
                 "Date": st.column_config.DateColumn("Date", format="DD.MM.YYYY"),
@@ -1142,7 +1254,6 @@ elif selected_tab == "Past Receipts":
                     for name in ROOMMATES
                 },
             },
-            height=min(38 + 35 * len(ledger), 460),
         )
         if (ledger["Check"] == "⚠").any():
             st.warning(
@@ -1177,6 +1288,7 @@ elif selected_tab == "Past Receipts":
                 st.dataframe(
                     guest_view[[c for c in ["Product_Name", "Category", "Qty", "Line_Total", "Beneficiary"] if c in guest_view.columns]],
                     hide_index=True,
+                    height="content",
                     column_config={
                         "Product_Name": st.column_config.TextColumn("Item"),
                         "Qty": st.column_config.NumberColumn("Qty", format="%.3g"),
@@ -1469,6 +1581,7 @@ elif selected_tab == "Balances & Settlements":
                     ]
                 ),
                 hide_index=True,
+                height="content",
                 column_config={
                     column: st.column_config.NumberColumn(column, format="CHF %.2f")
                     for column in [
@@ -1556,6 +1669,7 @@ elif selected_tab == "Balances & Settlements":
             st.dataframe(
                 history[history_columns],
                 hide_index=True,
+                height="content",
                 column_config={
                     "Date": st.column_config.DateColumn("Date", format="DD.MM.YYYY"),
                     "From_Roommate": st.column_config.TextColumn("From"),
@@ -1582,55 +1696,100 @@ elif selected_tab == "Total Spendings":
     all_breakdowns = receipt_breakdowns(df_receipts, df_all_items)
 
     if all_breakdowns:
-        available_years = sorted(
-            {b.date.year for b in all_breakdowns if pd.notna(b.date)}, reverse=True
-        )
-        month_options = ["All-time"] + [
-            calendar.month_name[month] for month in range(1, 13)
-        ]
-        month_col, year_col = st.columns(2)
-        with month_col:
-            selected_month = st.selectbox(
-                "Month",
-                month_options,
-                key="total_spendings_month",
+        this_month = pd.Timestamp(date.today()).to_period("M")
+        if "spend_period" not in st.session_state:
+            st.session_state["spend_period"] = str(this_month)
+
+        def _shift_month(step: int) -> None:
+            current = st.session_state.get("spend_period", str(this_month))
+            base = this_month if current == "all" else pd.Period(current, freq="M")
+            st.session_state["spend_period"] = str(min(base + step, this_month))
+
+        def _toggle_all_time() -> None:
+            st.session_state["spend_period"] = (
+                str(this_month) if st.session_state["spend_period"] == "all" else "all"
             )
 
-        breakdowns = all_breakdowns
-        period_slug = "all-time"
-        period_label = "all time"
-        if selected_month != "All-time":
-            years = sorted(set(available_years) | {date.today().year}, reverse=True)
-            default_year = available_years[0] if available_years else date.today().year
-            with year_col:
-                selected_year = st.selectbox(
-                    "Year",
-                    years,
-                    index=years.index(default_year),
-                    key="total_spendings_year",
-                )
-            month_number = list(calendar.month_name).index(selected_month)
+        period_value = st.session_state["spend_period"]
+        all_time = period_value == "all"
+        period = None if all_time else pd.Period(period_value, freq="M")
+        prev_col, label_col, next_col, all_col = st.columns(
+            [1, 3, 1, 1.4], vertical_alignment="center"
+        )
+        with prev_col:
+            st.button("◀ Prev", key="spend_prev", on_click=_shift_month, args=(-1,), width="stretch")
+        with label_col:
+            st.markdown(
+                f'<div class="wg-period">{"All time" if all_time else period.strftime("%B %Y")}</div>',
+                unsafe_allow_html=True,
+            )
+        with next_col:
+            st.button(
+                "Next ▶",
+                key="spend_next",
+                on_click=_shift_month,
+                args=(1,),
+                disabled=not all_time and period >= this_month,
+                width="stretch",
+            )
+        with all_col:
+            st.button(
+                "This month" if all_time else "All time",
+                key="spend_all_time",
+                on_click=_toggle_all_time,
+                width="stretch",
+            )
+
+        if all_time:
+            breakdowns = all_breakdowns
+            period_slug = "all-time"
+            period_label = "all time"
+        else:
             breakdowns = [
-                b
-                for b in all_breakdowns
-                if pd.notna(b.date) and b.date.month == month_number and b.date.year == selected_year
+                b for b in all_breakdowns if pd.notna(b.date) and b.date.to_period("M") == period
             ]
-            period_slug = f"{selected_month.lower()}-{selected_year}"
-            period_label = f"{selected_month} {selected_year}"
+            period_slug = period.strftime("%Y-%m")
+            period_label = period.strftime("%B %Y")
 
         summary = summarise_period(breakdowns)
         _stat_cards(
             [
                 ("Total spent", _chf(summary.total_paid / 100), f"Printed receipt totals, {period_label}"),
-                ("Receipts", f"{summary.receipt_count}", f"Logged in {period_label}"),
-                ("Average per person", _chf(summary.total_share / 300), "Mean share of the items bought"),
-                (
-                    "Biggest spender",
-                    max(ROOMMATES, key=lambda n: summary.share[ROOMMATE_CODES[n]]) if summary.total_share else "—",
-                    "Largest share of the items",
-                ),
+                ("Receipts & payments", f"{summary.receipt_count}", f"Logged in {period_label}"),
+                ("Average per person", _chf(summary.total_share / 300), "Mean share of what was bought"),
             ]
         )
+
+        st.subheader("Who spent how much")
+        st.caption(
+            "Paid = money they put down at the till. Their share = what the things they "
+            "benefit from cost. The difference is what they fronted for others (or owe)."
+        )
+        person_cards = []
+        for name in ROOMMATES:
+            code = ROOMMATE_CODES[name]
+            paid = summary.paid[code] / 100
+            share = summary.share[code] / 100
+            diff = paid - share
+            if diff > 0.004:
+                diff_html = f'<span class="wg-pill wg-pill-good">▲ Fronted {escape(_chf(diff))} for others</span>'
+            elif diff < -0.004:
+                diff_html = f'<span class="wg-pill wg-pill-bad">▼ Used {escape(_chf(-diff))} more than paid</span>'
+            else:
+                diff_html = '<span class="wg-pill">● Even</span>'
+            person_cards.append(
+                f"""<div class="wg-card wg-person" style="--wg-accent:{_ROOMMATE_COLORS[name]}">
+                <div class="wg-person-head"><span class="wg-avatar">{escape(name[0])}</span>
+                <div class="wg-label" style="font-size:1rem;font-weight:700;opacity:1">{escape(name)}</div></div>
+                <div class="wg-split">
+                  <div><div class="wg-label">Paid</div><div class="wg-value">{escape(_chf(paid))}</div>
+                  <div class="wg-note">{summary.receipts_paid[code]} receipt(s)</div></div>
+                  <div><div class="wg-label">Their share</div><div class="wg-value">{escape(_chf(share))}</div>
+                  <div class="wg-note">{(share / (summary.total_share / 100) * 100) if summary.total_share else 0:.0f}% of the total</div></div>
+                </div>{diff_html}</div>"""
+            )
+        st.markdown(f'<div class="wg-grid">{"".join(person_cards)}</div>', unsafe_allow_html=True)
+
         if summary.mismatched_ids:
             st.warning(
                 f"{len(summary.mismatched_ids)} receipt(s) in this period have items that don't add "
@@ -1663,19 +1822,20 @@ elif selected_tab == "Total Spendings":
             }
         )
 
-        st.subheader("Spending by roommate")
-        st.caption(
-            "Paid at the till is what they paid at checkout; share of items is their portion "
-            "of what was bought. Difference shows who fronted more than they used (before settlements)."
-        )
-        st.dataframe(
-            pd.DataFrame(summary_rows),
-            hide_index=True,
-            column_config={
-                column: st.column_config.NumberColumn(column, format="CHF %.2f")
-                for column in ["Paid at the till", "Share of items", "Difference"]
-            },
-        )
+        with st.expander("Table view"):
+            st.caption(
+                "Paid at the till is what they paid at checkout; share of items is their portion "
+                "of what was bought. Difference shows who fronted more than they used (before settlements)."
+            )
+            st.dataframe(
+                pd.DataFrame(summary_rows),
+                hide_index=True,
+                height="content",
+                column_config={
+                    column: st.column_config.NumberColumn(column, format="CHF %.2f")
+                    for column in ["Paid at the till", "Share of items", "Difference"]
+                },
+            )
 
         paid_col, cat_col = st.columns(2, gap="large")
         with paid_col:
