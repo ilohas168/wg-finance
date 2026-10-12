@@ -13,6 +13,7 @@ import binascii
 import json
 import logging
 import os
+import threading
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
@@ -272,20 +273,50 @@ def _get_sheet_id() -> str:
 # New Google Sheets helpers                                            #
 # ------------------------------------------------------------------ #
 
+class SheetsBusyError(RuntimeError):
+    """Google Sheets refused a request because the per-minute quota ran out."""
+
+
+def is_rate_limited(exc: BaseException) -> bool:
+    """True when *exc* is Google's "too many requests" (HTTP 429) response."""
+    if isinstance(exc, SheetsBusyError):
+        return True
+    if isinstance(exc, gspread.exceptions.APIError):
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) == 429:
+            return True
+        return "RATE_LIMIT_EXCEEDED" in str(exc) or "Quota exceeded" in str(exc)
+    return False
+
+
+# All app users share one service account, and Google allows it only about
+# 60 read requests per minute. Authenticating and opening the spreadsheet
+# once per process (instead of on every call) saves two requests per read.
+_SPREADSHEET_CACHE: dict[str, gspread.Spreadsheet] = {}
+_SPREADSHEET_LOCK = threading.Lock()
+
+
 def _open_sheet() -> gspread.Spreadsheet:
-    """Open the sharehouse ledger spreadsheet by ``GOOGLE_SHEET_ID``."""
+    """Open the sharehouse ledger spreadsheet by ``GOOGLE_SHEET_ID`` (cached)."""
     sheet_id = _get_sheet_id()
     if not sheet_id:
         raise RuntimeError(
             "Set GOOGLE_SHEET_ID environment variable to the target Sheet ID."
         )
+    with _SPREADSHEET_LOCK:
+        cached = _SPREADSHEET_CACHE.get(sheet_id)
+    if cached is not None:
+        return cached
     try:
         client = _get_gspread_client()
     except Exception:
         logger.exception("Failed to create Google Sheets client.")
         raise
     try:
-        return client.open_by_key(sheet_id)
+        spreadsheet = client.open_by_key(sheet_id)
+        with _SPREADSHEET_LOCK:
+            _SPREADSHEET_CACHE[sheet_id] = spreadsheet
+        return spreadsheet
     except Exception:
         logger.exception(
             "open_by_key(%r) failed — verify GOOGLE_SHEET_ID and service-account permissions.",
@@ -419,6 +450,8 @@ def get_all_receipts() -> pd.DataFrame:
             )
         return df
     except Exception as e:
+        if is_rate_limited(e):
+            raise SheetsBusyError("Google Sheets is busy (too many requests).") from e
         logger.error(f"Error reading receipts: {e}")
         # Return empty DataFrame with required columns
         return empty
@@ -443,6 +476,8 @@ def get_receipt_items(receipt_id: str = None) -> pd.DataFrame:
 
         return df
     except Exception as e:
+        if is_rate_limited(e):
+            raise SheetsBusyError("Google Sheets is busy (too many requests).") from e
         logger.error(f"Error reading receipt items: {e}")
         # Return empty DataFrame with required columns
         return pd.DataFrame(columns=_LINE_ITEMS_HEADERS_V2)
@@ -463,6 +498,8 @@ def get_settlements() -> pd.DataFrame:
         df = pd.DataFrame(values[1:], columns=values[0])
         return df
     except Exception as e:
+        if is_rate_limited(e):
+            raise SheetsBusyError("Google Sheets is busy (too many requests).") from e
         logger.error(f"Error reading settlements: {e}")
         # Return empty DataFrame with required columns
         return pd.DataFrame(columns=_SETTLEMENT_HEADERS)

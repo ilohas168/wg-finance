@@ -188,6 +188,7 @@ with account_col:
                     from app.services.auth import (  # noqa: E402
                         verify_user,
                         RESULT_OK,
+                        RESULT_BUSY,
                         RESULT_DB_ERROR,
                     )
 
@@ -196,6 +197,11 @@ with account_col:
                         st.session_state.logged_in_user = _uname.strip().lower()
                         st.session_state.logged_in_name = payload
                         st.rerun()
+                    elif result_code == RESULT_BUSY:
+                        st.warning(
+                            "⏳ Google Sheets is busy right now (too many requests in the "
+                            "last minute). Wait about a minute and try again."
+                        )
                     elif result_code == RESULT_DB_ERROR:
                         st.error(
                             "Unable to connect to Google Sheets authentication table. "
@@ -840,15 +846,40 @@ def _hbar_chart(totals: pd.Series, height: Optional[int] = None) -> go.Figure:
     return fig
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_ledger() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Read the three ledger sheets, shared by all visitors for up to a minute.
+
+    Everyone uses one Google service account, which may only make about 60
+    sheet reads per minute. Without this cache every tap re-read all three
+    sheets, so a couple of people using the app at once ran out of quota
+    (and logins then failed). Writes call ``_invalidate_ledger_cache``.
+    """
+    from app.services.ledger import get_all_receipts, get_receipt_items, get_settlements  # type: ignore
+
+    return get_all_receipts(), get_receipt_items(), get_settlements()
+
+
+def _invalidate_ledger_cache() -> None:
+    """Drop cached sheet data so the next page load shows a just-saved change."""
+    _fetch_ledger.clear()
+
+
 def _load_ledger_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Load receipts, line items, and settlements, degrading to empty frames."""
+    from app.services.ledger import is_rate_limited
+
     try:
         with st.spinner("Loading the ledger…"):
-            from app.services.ledger import get_all_receipts, get_receipt_items, get_settlements  # type: ignore
-
-            return get_all_receipts(), get_receipt_items(), get_settlements()
+            return _fetch_ledger()
     except Exception as exc:
-        st.error(f"Failed to load data: {exc}")
+        if is_rate_limited(exc):
+            st.warning(
+                "⏳ Google Sheets is busy right now (too many requests in the last minute). "
+                "Wait about a minute and reload the page."
+            )
+        else:
+            st.error(f"Failed to load data: {exc}")
         return (
             pd.DataFrame(columns=["Receipt_ID", "Date", "Store", "Paid_By"]),
             pd.DataFrame(columns=["Receipt_ID", "Line_Total", "Beneficiary"]),
@@ -1025,6 +1056,7 @@ elif selected_tab == "Upload Receipt":
             )
             try:
                 save_receipt(receipt_data, items)
+                _invalidate_ledger_cache()
             except Exception as exc:  # surfaced on the next run
                 st.session_state["manual_entry_error"] = f"Error saving to Sheets: {exc}"
                 return
@@ -1286,6 +1318,7 @@ elif selected_tab == "Upload Receipt":
                     }
                     items = clean_df.to_dict(orient="records")
                     rid = save_receipt(receipt_data, items)
+                    _invalidate_ledger_cache()
                 st.toast(f"Saved receipt **{rid}**", icon="✅")
                 st.success(f"Receipt **{rid}** saved successfully.")
             except Exception as exc:
@@ -1503,6 +1536,7 @@ elif selected_tab == "Past Receipts":
                                 selected_rid,
                                 edited_receipt_date.isoformat(),
                             )
+                            _invalidate_ledger_cache()
                         st.session_state["receipt_date_message"] = (
                             f"Updated {selected_rid} to {edited_receipt_date.isoformat()}."
                         )
@@ -1571,6 +1605,7 @@ elif selected_tab == "Past Receipts":
                                 }
                                 items = clean_df.to_dict(orient="records")
                                 update_receipt(selected_rid, receipt_data, items)
+                                _invalidate_ledger_cache()
                             st.toast(f"Updated receipt **{selected_rid}**", icon="✅")
                             st.session_state["receipt_update_message"] = (
                                 f"Saved changes to {editing.store}."
@@ -1621,6 +1656,7 @@ elif selected_tab == "Past Receipts":
                                 from app.services.ledger import delete_receipt  # type: ignore
 
                                 _, deleted_items = delete_receipt(selected_rid)
+                                _invalidate_ledger_cache()
                         except Exception as exc:
                             st.error(f"Error deleting receipt: {exc}")
                         else:
@@ -1768,6 +1804,7 @@ elif selected_tab == "Balances & Settlements":
                     with st.spinner("Logging settlement…"):
                         from app.services.ledger import append_settlement  # type: ignore
                         sid = append_settlement(frm_rm, to_rm, amt, method)
+                        _invalidate_ledger_cache()
                     st.session_state["settlement_message"] = f"Settlement {sid} logged."
                     st.rerun()
                 except Exception as exc:
