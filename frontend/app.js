@@ -152,16 +152,44 @@ function toast(message, error = false) {
   setTimeout(() => el.remove(), error ? 5000 : 2600);
 }
 
+let lockedScrollY = null;
+
+function sizeSheet() {
+  // Cap the sheet at 90% of the *visible* screen (visualViewport follows
+  // Safari's toolbars and the on-screen keyboard; vh/dvh do not reliably).
+  const h = window.visualViewport?.height || window.innerHeight;
+  document.documentElement.style.setProperty("--sheet-max", `${Math.round(h * 0.9)}px`);
+}
+
 function openSheet(html) {
   const root = document.getElementById("sheet-root");
+  sizeSheet();
   root.innerHTML = `<div class="sheet-backdrop" data-action="close-sheet"></div>
-    <div class="sheet" role="dialog" aria-modal="true"><div class="grabber"></div>${html}</div>`;
-  document.body.classList.add("sheet-open");
+    <div class="sheet" role="dialog" aria-modal="true"><div class="grabber"></div>
+    <div class="sheet-body">${html}</div></div>`;
+  if (lockedScrollY === null) {
+    // Pin the page where it is; body overflow:hidden alone does not stop
+    // iOS Safari from scrolling the page behind the sheet.
+    lockedScrollY = window.scrollY;
+    document.body.style.top = `-${lockedScrollY}px`;
+    document.body.classList.add("sheet-open");
+  }
 }
 function closeSheet() {
   document.getElementById("sheet-root").innerHTML = "";
-  document.body.classList.remove("sheet-open");
+  if (lockedScrollY !== null) {
+    document.body.classList.remove("sheet-open");
+    document.body.style.top = "";
+    window.scrollTo(0, lockedScrollY);
+    lockedScrollY = null;
+  }
 }
+
+// Swiping on the dimmed backdrop must not drag the page underneath.
+document.getElementById("sheet-root").addEventListener("touchmove", (e) => {
+  if (!e.target.closest(".sheet-body")) e.preventDefault();
+}, { passive: false });
+window.visualViewport?.addEventListener("resize", sizeSheet);
 
 // ------------------------------------------------------------------------- //
 // Routing & layout                                                           //
