@@ -22,6 +22,7 @@ const S = {
   offline: false,
   receiptsFilter: { month: thisMonth(), search: "", payer: "Everyone" },
   statsMonth: thisMonth(),
+  statsScope: "me", // "me" = the logged-in person's numbers, "all" = household
   draft: null,
   scan: null,
 };
@@ -763,15 +764,20 @@ function bars(rows, color) {
     <span class="num small">${nf.format(r.amount)}</span></div>`).join("");
 }
 
-function trendChart(endMonth) {
+function trendChart(endMonth, person = null) {
+  // person set: only that roommate's share per month; otherwise everyone stacked.
+  const who = person ? [person] : ROOMMATES;
   const months = [];
   let m = endMonth === "all" ? thisMonth() : endMonth;
   for (let i = 0; i < 6; i++) { months.unshift(m); m = shiftMonth(m, -1); }
-  const totals = months.map((mo) => S.data.periods[mo]?.total_share || 0);
+  const totals = months.map((mo) => {
+    const p = S.data.periods[mo];
+    return person ? p?.people[person]?.share || 0 : p?.total_share || 0;
+  });
   const max = Math.max(...totals, 1);
   return `<div class="trend">${months.map((mo, i) => {
       const p = S.data.periods[mo];
-      const segs = ROOMMATES.slice().reverse().map((n) => {
+      const segs = who.slice().reverse().map((n) => {
         const v = p?.people[n]?.share || 0;
         return v > 0 ? `<div class="seg-bar" style="height:${(v / max) * 100}%;background:${COLOR[n]}" title="${esc(n)} ${chf(v)}"></div>` : "";
       }).join("");
@@ -781,7 +787,7 @@ function trendChart(endMonth) {
         <div class="col">${segs}</div>
         <div class="lbl">${new Date(y, mm - 1, 1).toLocaleDateString("en-GB", { month: "short" })}</div></div>`;
     }).join("")}</div>
-    <div class="legend">${ROOMMATES.map((n) => `<span><i style="--c:${COLOR[n]}"></i>${esc(n)}</span>`).join("")}</div>`;
+    <div class="legend">${who.map((n) => `<span><i style="--c:${COLOR[n]}"></i>${esc(person ? `Your share (${n})` : n)}</span>`).join("")}</div>`;
 }
 
 // Bottom sheet listing every receipt in a period (optionally one payer's),
@@ -808,7 +814,11 @@ function receiptsSheet(period, payer, onlyMismatched = false) {
 
 function statsScreen() {
   const month = S.statsMonth;
-  const p = S.data.periods[month] || { receipts: 0, total_paid: 0, total_share: 0, people: {}, categories: [], stores: [], mismatched: [] };
+  const p = S.data.periods[month] || { receipts: 0, total_paid: 0, total_share: 0, people: {}, categories: [], people_categories: {}, stores: [], mismatched: [] };
+  const me = S.data.me;
+  const scope = me ? S.statsScope : "all";
+  const personal = scope === "me";
+  const categories = personal ? p.people_categories?.[me] || [] : p.categories;
   const people = ROOMMATES.map((n) => {
     const x = p.people[n] || { paid: 0, share: 0, receipts_paid: 0 };
     const diff = x.paid - x.share;
@@ -832,12 +842,13 @@ function statsScreen() {
     ${p.mismatched.length ? `<button class="banner warn banner-btn" data-action="receipts-sheet" data-period="${month}" data-mismatch="1" style="margin-top:10px">⚠ ${p.mismatched.length} receipt(s) here don't add up — “paid” and “share” totals differ. <b>Tap to fix ›</b></button>` : ""}
     <div class="section-title">Who spent how much</div>
     <div class="stack">${people}</div>
-    <div class="section-title">Categories</div>
-    <div class="card">${p.categories.length ? bars(p.categories, "#6250d6") : `<span class="muted">Nothing yet.</span>`}</div>
-    <div class="section-title">Top stores</div>
-    <div class="card">${p.stores.length ? bars(p.stores, "#6250d6") : `<span class="muted">Nothing yet.</span>`}</div>
-    <div class="section-title">Last 6 months · shares</div>
-    <div class="card">${trendChart(month)}</div>`;
+    ${me ? `<div class="scope-switch">${segButtons("stats-scope", [["me", "Mine"], ["all", "Everyone"]], scope)}</div>` : ""}
+    <div class="section-title">Last 6 months · ${personal ? "your share" : "everyone's shares"}</div>
+    <div class="card">${trendChart(month, personal ? me : null)}</div>
+    <div class="section-title">Categories · ${personal ? "your share" : "household"}</div>
+    <div class="card">${categories.length ? bars(categories, personal ? COLOR[me] : "#6250d6") : `<span class="muted">Nothing yet.</span>`}</div>
+    <div class="section-title">Top stores · household</div>
+    <div class="card">${p.stores.length ? bars(p.stores, "#6250d6") : `<span class="muted">Nothing yet.</span>`}</div>`;
 }
 
 // ------------------------------------------------------------------------- //
@@ -910,6 +921,7 @@ document.addEventListener("click", async (e) => {
   else if (a === "seg") {
     el.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === el));
     if (el.dataset.name === "payer" && S.draft) S.draft.payer = el.dataset.value;
+    if (el.dataset.name === "stats-scope") { S.statsScope = el.dataset.value; render(); }
   }
   else if (a === "add-item") {
     S.draft.items.push({ name: "", category: "General", qty: 1, line_total: 0, beneficiary: "ALL" });

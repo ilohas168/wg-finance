@@ -374,6 +374,47 @@ def category_totals_cents(
     return round_shares_to_cents(exact, total) if exact else {}
 
 
+def person_category_totals_cents(
+    breakdowns: list[ReceiptBreakdown], items_df: pd.DataFrame
+) -> dict[str, dict[str, int]]:
+    """Each roommate's spending per item category, in cents.
+
+    An item counts for each of its beneficiaries with their even part of the
+    line total. A person's part of a receipt-wide discount is spread over
+    their own categories in proportion to their positive spending. For every
+    person the categories add up exactly to their share for the period
+    (the same number ``summarise_period`` reports).
+    """
+    exact: dict[str, dict[str, Decimal]] = {code: {} for code in "ABC"}
+    for breakdown in breakdowns:
+        per_person: dict[str, dict[str, Decimal]] = {code: {} for code in "ABC"}
+        for _, item in items_for_receipt(items_df, breakdown.receipt_id).iterrows():
+            codes = beneficiary_codes(item.get("Beneficiary", "ALL"))
+            part = Decimal(line_total_cents(item)) / len(codes)
+            category = str(item.get("Category", "") or "").strip() or "General"
+            for code in codes:
+                per_person[code][category] = per_person[code].get(category, Decimal(0)) + part
+        for code in "ABC":
+            categories = per_person[code]
+            # What this receipt's discount took off this person's share.
+            discount = sum(categories.values(), Decimal(0)) - breakdown.exact_shares[code]
+            if discount:
+                weights = {c: max(Decimal(0), v) for c, v in categories.items()}
+                weight_total = sum(weights.values(), Decimal(0))
+                if weight_total:
+                    for category in categories:
+                        categories[category] -= discount * weights[category] / weight_total
+                else:
+                    categories["General"] = categories.get("General", Decimal(0)) - discount
+            for category, amount in categories.items():
+                exact[code][category] = exact[code].get(category, Decimal(0)) + amount
+    targets = allocate_shares(breakdowns)
+    return {
+        code: round_shares_to_cents(exact[code], targets[code]) if exact[code] else {}
+        for code in "ABC"
+    }
+
+
 def manual_entry_records(
     description: str,
     amount: float,

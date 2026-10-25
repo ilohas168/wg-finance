@@ -252,3 +252,42 @@ def test_manual_entry_is_split_like_a_receipt():
     # is owed 34.66 and Fabian and Pierre owe 17.33 each.
     assert balances == {"A": 3466, "B": -1733, "C": -1733}
     assert sum(summarise_period(ledger).share.values()) == 5200
+
+
+def test_person_categories_split_items_by_beneficiary():
+    from app.services.ledger_math import person_category_totals_cents
+
+    items = [
+        _item("R1", "30.00", "ALL", "Food"),
+        _item("R1", "12.00", "AB", "Household"),
+        _item("R1", "5.00", "C", "Drink"),
+    ]
+    ledger = _ledger([_receipt("R1", "Shin", "47.00")], items)
+
+    totals = person_category_totals_cents(ledger, pd.DataFrame(items))
+
+    assert totals["A"] == {"Food": 1000, "Household": 600}
+    assert totals["B"] == {"Food": 1000, "Household": 600}
+    assert totals["C"] == {"Food": 1000, "Drink": 500}
+
+
+def test_person_categories_add_up_to_each_share_with_discounts():
+    from app.services.ledger_math import person_category_totals_cents
+
+    rng = random.Random(11)
+    receipts, items = [], []
+    for i in range(60):
+        rid = f"R{i}"
+        lines = [(round(rng.uniform(-2, 30), 2), rng.choice(["ALL", "A", "B", "C", "AB", "BC", "AC"]),
+                  rng.choice(["Food", "Drink", "Household"])) for _ in range(rng.randint(1, 6))]
+        discount = round(rng.uniform(0, 4), 2) if rng.random() < 0.4 else 0
+        total = sum(a for a, _, _ in lines) - discount
+        receipts.append(_receipt(rid, rng.choice(["Shin", "Fabian", "Pierre"]), f"{total:.2f}", discount=f"{discount}"))
+        items += [_item(rid, f"{a:.2f}", ben, cat) for a, ben, cat in lines]
+    ledger = _ledger(receipts, items)
+
+    totals = person_category_totals_cents(ledger, pd.DataFrame(items))
+    shares = summarise_period(ledger).share
+
+    for code in "ABC":
+        assert sum(totals[code].values()) == shares[code]
