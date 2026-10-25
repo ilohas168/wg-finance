@@ -167,3 +167,20 @@ def test_sheet_quota_error_becomes_503(client, monkeypatch):
     api._invalidate()
     response = client.get("/api/state")
     assert response.status_code == 503
+
+
+def test_routes_work_with_or_without_the_api_prefix(client):
+    # Vercel's service rewrite may or may not strip /api before the request
+    # reaches the function; both forms must reach the same handlers.
+    assert client.get("/api/health").json() == {"status": "ok"}
+    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/state").status_code == 200
+
+
+def test_phone_app_files_are_served_and_unknown_api_paths_404(client):
+    page = client.get("/")
+    assert page.status_code == 200 and "<title>WG Finance</title>" in page.text
+    assert client.get("/receipts/anything").headers["content-type"].startswith("text/html")
+    assert client.get("/manifest.webmanifest").headers["content-type"] == "application/manifest+json"
+    assert client.get("/app.js").headers["content-type"].startswith("text/javascript")
+    assert client.get("/api/nope").status_code == 404

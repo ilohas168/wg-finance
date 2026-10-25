@@ -5,6 +5,7 @@ Streamlit dashboard. It uses the same Google Sheet, logins, Groq receipt
 reader and money maths as before.
 
 ```
+vercel.json      Vercel Services config: one public service, "web"
 public/          the app the phone loads (HTML/CSS/JS, served from a CDN)
 api/index.py     the JSON API (FastAPI) — runs as one Vercel Python function
 app/services/    shared code: Google Sheets, logins, ledger maths, Groq parser
@@ -21,8 +22,11 @@ app/services/    shared code: Google Sheets, logins, ledger maths, Groq parser
 ## Deploy on Vercel (free)
 
 1. Sign in at <https://vercel.com> with GitHub and click **Add New → Project**.
-2. Import `ilohas168/wg-finance`. Leave the framework preset on **Other**
-   and the root directory as `./` (the repo's `vercel.json` sets the rest).
+2. Import `ilohas168/wg-finance`. Set the **Framework Preset** to
+   **Services** and leave the root directory as `./`. The repo's
+   `vercel.json` defines one service, `web` (the FastAPI app in
+   `api/index.py`, which also serves the phone app from `public/`), and
+   routes all traffic to it.
 3. Under **Environment Variables**, add the same secrets the Streamlit app has:
 
    | Name | Value |

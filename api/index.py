@@ -32,7 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import pandas as pd  # noqa: E402
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile  # noqa: E402
+from fastapi import APIRouter, Depends, FastAPI, File, Header, HTTPException, Query, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
@@ -60,6 +60,10 @@ from app.services.ledger_math import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="WG Finance API", docs_url=None, redoc_url=None)
+# Routes are defined once and mounted under /api (what the phone app calls)
+# and at the root, so they work whether or not Vercel's service rewrite
+# strips the /api prefix before the request reaches this function.
+router = APIRouter()
 
 CATEGORIES = ["Food", "Drink", "Toiletries", "Household", "General"]
 TOKEN_DAYS = 90
@@ -400,12 +404,12 @@ def _sheet_rows(body: ReceiptIn) -> tuple[dict[str, Any], list[dict[str, Any]]]:
 # Routes                                                                       #
 # --------------------------------------------------------------------------- #
 
-@app.get("/api/health")
+@router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/api/login")
+@router.post("/login")
 def login(body: LoginIn) -> dict[str, Any]:
     from app.services.auth import RESULT_BUSY, RESULT_OK, verify_user
 
@@ -420,7 +424,7 @@ def login(body: LoginIn) -> dict[str, Any]:
     raise HTTPException(status_code=500, detail="Could not reach the user list in Google Sheets.")
 
 
-@app.post("/api/password")
+@router.post("/password")
 def change_password(body: PasswordIn, user: dict = Depends(current_user)) -> dict[str, str]:
     from app.services.auth import change_password as change, verify_user, RESULT_OK
 
@@ -433,14 +437,14 @@ def change_password(body: PasswordIn, user: dict = Depends(current_user)) -> dic
     return {"message": message}
 
 
-@app.get("/api/state")
+@router.get("/state")
 def state(fresh: bool = Query(False), user: dict = Depends(current_user)) -> dict[str, Any]:
     data = build_state(*_read_sheets(fresh=fresh))
     data["me"] = user["n"] if user["n"] in ROOMMATES else None
     return data
 
 
-@app.post("/api/parse")
+@router.post("/parse")
 async def parse(file: UploadFile = File(...), user: dict = Depends(current_user)) -> dict[str, Any]:
     from app.services.vision_line_items import parse_itemized_receipt
 
@@ -473,7 +477,7 @@ async def parse(file: UploadFile = File(...), user: dict = Depends(current_user)
     }
 
 
-@app.post("/api/receipts")
+@router.post("/receipts")
 def create_receipt(body: ReceiptIn, user: dict = Depends(current_user)) -> dict[str, str]:
     receipt, items = _sheet_rows(body)
     prefix = "MAN" if body.manual else "REC"
@@ -483,7 +487,7 @@ def create_receipt(body: ReceiptIn, user: dict = Depends(current_user)) -> dict[
     return {"id": receipt_id}
 
 
-@app.put("/api/receipts/{receipt_id}")
+@router.put("/receipts/{receipt_id}")
 def update_receipt(receipt_id: str, body: ReceiptIn, user: dict = Depends(current_user)) -> dict[str, str]:
     receipt, items = _sheet_rows(body)
     receipt["Receipt_ID"] = receipt_id
@@ -492,14 +496,14 @@ def update_receipt(receipt_id: str, body: ReceiptIn, user: dict = Depends(curren
     return {"id": receipt_id}
 
 
-@app.delete("/api/receipts/{receipt_id}")
+@router.delete("/receipts/{receipt_id}")
 def delete_receipt(receipt_id: str, user: dict = Depends(current_user)) -> dict[str, int]:
     deleted_receipts, deleted_items = ledger.delete_receipt(receipt_id)
     _invalidate()
     return {"receipts": deleted_receipts, "items": deleted_items}
 
 
-@app.post("/api/settlements")
+@router.post("/settlements")
 def add_settlement(body: SettlementIn, user: dict = Depends(current_user)) -> dict[str, str]:
     frm, to = _roommate_or_400(body.from_roommate), _roommate_or_400(body.to_roommate)
     if frm == to:
@@ -509,14 +513,22 @@ def add_settlement(body: SettlementIn, user: dict = Depends(current_user)) -> di
     return {"id": settlement_id}
 
 
-# Local development: serve the phone app too. On Vercel, public/ is served
-# by the CDN and only /api/* reaches this function.
+app.include_router(router, prefix="/api")
+app.include_router(router)
+
+# Serve the phone app from public/ for any request that reaches this
+# function (local development, or if the platform routes static paths here
+# instead of serving them from its CDN). API routes above take precedence.
 _PUBLIC = ROOT / "public"
-if _PUBLIC.is_dir() and not os.environ.get("VERCEL"):
+_MEDIA_TYPES = {".webmanifest": "application/manifest+json", ".js": "text/javascript"}
+
+if _PUBLIC.is_dir():
 
     @app.get("/{path:path}", include_in_schema=False)
     def _static(path: str):
         target = (_PUBLIC / path).resolve()
         if path and target.is_file() and _PUBLIC in target.parents:
-            return FileResponse(target)
+            return FileResponse(target, media_type=_MEDIA_TYPES.get(target.suffix))
+        if path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
         return FileResponse(_PUBLIC / "index.html")
