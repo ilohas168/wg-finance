@@ -12,6 +12,8 @@ const FOR_OPTIONS = [
 const CATEGORIES = ["Food", "Drink", "Toiletries", "Household", "General"];
 const METHODS = ["Twint", "Bank Transfer", "Cash"];
 const REFRESH_AFTER_MS = 60_000;
+// Shown in Settings so you can check the phone runs the latest version.
+const APP_VERSION = "11";
 
 const S = {
   token: localStorage.getItem("wg.token"),
@@ -185,9 +187,23 @@ function closeSheet() {
   }
 }
 
-// Swiping on the dimmed backdrop must not drag the page underneath.
-document.getElementById("sheet-root").addEventListener("touchmove", (e) => {
-  if (!e.target.closest(".sheet-body")) e.preventDefault();
+// Touch handling so only the sheet's list ever scrolls (iOS Safari would
+// otherwise hand the gesture to the page, which then bounces or scrolls):
+// - when the list is at its very top/bottom, nudge it 1px inside, so iOS
+//   scrolls the list instead of passing the swipe on to the page;
+// - swipes on the backdrop, or on a list too short to scroll, do nothing.
+const sheetRoot = document.getElementById("sheet-root");
+sheetRoot.addEventListener("touchstart", (e) => {
+  const body = e.target.closest(".sheet-body");
+  if (!body) return;
+  const max = body.scrollHeight - body.clientHeight;
+  if (max <= 0) return;
+  if (body.scrollTop <= 0) body.scrollTop = 1;
+  else if (body.scrollTop >= max) body.scrollTop = max - 1;
+}, { passive: true });
+sheetRoot.addEventListener("touchmove", (e) => {
+  const body = e.target.closest(".sheet-body");
+  if (!body || body.scrollHeight <= body.clientHeight) e.preventDefault();
 }, { passive: false });
 window.visualViewport?.addEventListener("resize", sizeSheet);
 
@@ -905,6 +921,7 @@ function settingsScreen() {
       <button class="btn" type="submit">Update password</button>
     </form>
     <div class="section-title">Data</div>
+    <p class="muted small" style="margin:0 4px 8px">App version ${APP_VERSION}</p>
     <button class="btn" data-action="refresh-now">↻ Reload from Google Sheets</button>
     <button class="btn danger" data-action="logout" style="margin-top:10px">Log out</button>`;
 }
@@ -1035,6 +1052,13 @@ document.addEventListener("visibilitychange", () => {
 });
 
 if ("serviceWorker" in navigator) {
+  // When an updated service worker takes over, reload once so the new
+  // version is used right away (not only on the next launch).
+  const hadController = Boolean(navigator.serviceWorker.controller);
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (hadController && !reloaded) { reloaded = true; location.reload(); }
+  });
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
 
