@@ -113,6 +113,8 @@ def test_cutlery_without_receipt_is_split_three_ways(client, sheet):
     month = state["periods"][today[:7]]
     assert month["people"]["Shin"] == {"paid": 52.0, "share": 17.34, "receipts_paid": 1}
     assert month["categories"] == [{"name": "Household", "amount": 52.0}]
+    assert month["people_categories"]["Shin"] == [{"name": "Household", "amount": 17.34}]
+    assert month["people_categories"]["Fabian"] == [{"name": "Household", "amount": 17.33}]
 
 
 def test_edit_keeps_printed_total_and_flags_mismatch(client, sheet):

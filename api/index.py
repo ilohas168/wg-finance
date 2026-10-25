@@ -50,6 +50,7 @@ from app.services.ledger_math import (  # noqa: E402
     compute_balances,
     items_for_receipt,
     line_total_cents,
+    person_category_totals_cents,
     money_to_cents,
     receipt_breakdowns,
     roommate_code,
@@ -208,6 +209,14 @@ def _receipt_json(b: ReceiptBreakdown, receipt: pd.Series, items: pd.DataFrame) 
 def _period_json(breakdowns: list[ReceiptBreakdown], items_df: pd.DataFrame) -> dict[str, Any]:
     summary = summarise_period(breakdowns)
     categories = category_totals_cents(breakdowns, items_df)
+    person_categories = person_category_totals_cents(breakdowns, items_df)
+
+    def ranked(totals: dict[str, int]) -> list[dict[str, Any]]:
+        return sorted(
+            ({"name": k, "amount": v / 100} for k, v in totals.items() if v > 0),
+            key=lambda c: -c["amount"],
+        )
+
     stores: dict[str, int] = {}
     for b in breakdowns:
         stores[b.store] = stores.get(b.store, 0) + b.paid_cents
@@ -223,10 +232,11 @@ def _period_json(breakdowns: list[ReceiptBreakdown], items_df: pd.DataFrame) -> 
             }
             for name, code in ROOMMATE_CODES.items()
         },
-        "categories": sorted(
-            ({"name": k, "amount": v / 100} for k, v in categories.items() if v > 0),
-            key=lambda c: -c["amount"],
-        ),
+        "categories": ranked(categories),
+        # Each roommate's own categories; they add up to that person's share.
+        "people_categories": {
+            CODE_TO_ROOMMATE[code]: ranked(person_categories[code]) for code in "ABC"
+        },
         "stores": sorted(
             ({"name": k, "amount": v / 100} for k, v in stores.items() if v > 0),
             key=lambda s: -s["amount"],
