@@ -313,10 +313,35 @@ function monthSwitch(value, action) {
   const now = thisMonth();
   return `<div class="month-switch">
     <button data-action="${action}" data-step="-1" aria-label="Previous month" ${value === "all" ? "disabled" : ""}>‹</button>
-    <div class="label">${esc(monthLabel(value))}</div>
+    <button class="label" data-action="pick-month" data-target="${action}" aria-label="Choose month">${esc(monthLabel(value))} ▾</button>
     <button data-action="${action}" data-step="1" aria-label="Next month" ${value === "all" || value >= now ? "disabled" : ""}>›</button>
     <button class="all" data-action="${action}" data-step="all">${value === "all" ? "Month" : "All"}</button>
   </div>`;
+}
+
+// Bottom sheet listing every month (newest year first) with its total spend,
+// so any month is one tap away instead of several ‹ presses.
+function monthPicker(target) {
+  const current = target === "stats-month" ? S.statsMonth : S.receiptsFilter.month;
+  const now = thisMonth();
+  const known = Object.keys(S.data.periods).filter((k) => k !== "all");
+  for (const r of S.data.receipts) if (r.date) known.push(r.date.slice(0, 7));
+  const first = known.reduce((a, b) => (b < a ? b : a), now);
+  const years = [];
+  for (let y = Number(now.slice(0, 4)); y >= Number(first.slice(0, 4)); y--) years.push(y);
+  const cell = (month) => {
+    const total = S.data.periods[month]?.total_paid || 0;
+    const future = month > now;
+    const name = new Date(Number(month.slice(0, 4)), Number(month.slice(5)) - 1, 1).toLocaleDateString("en-GB", { month: "short" });
+    return `<button class="month-cell ${month === current ? "on" : ""} ${total ? "" : "empty-month"}"
+      data-action="set-month" data-target="${target}" data-month="${month}" ${future ? "disabled" : ""}>
+      <span>${esc(name)}</span><small class="num">${total ? Math.round(total) : "–"}</small></button>`;
+  };
+  openSheet(`<h2>Choose a month</h2>
+    <button class="btn ${current === "all" ? "primary" : ""}" data-action="set-month" data-target="${target}" data-month="all">All time</button>
+    ${years.map((y) => `<div class="section-title">${y}</div><div class="month-grid">${
+      Array.from({ length: 12 }, (_, i) => cell(`${y}-${String(i + 1).padStart(2, "0")}`)).join("")}</div>`).join("")}
+    <p class="muted small" style="margin:12px 4px 0">Numbers show CHF spent that month.</p>`);
 }
 
 function filteredReceipts() {
@@ -815,6 +840,13 @@ document.addEventListener("click", async (e) => {
     const step = el.dataset.step;
     const next = step === "all" ? (cur === "all" ? thisMonth() : "all") : shiftMonth(cur, Number(step));
     if (key) S.statsMonth = next; else S.receiptsFilter.month = next;
+    render();
+  }
+  else if (a === "pick-month") { monthPicker(el.dataset.target); }
+  else if (a === "set-month") {
+    if (el.dataset.target === "stats-month") S.statsMonth = el.dataset.month;
+    else S.receiptsFilter.month = el.dataset.month;
+    closeSheet();
     render();
   }
   else if (a === "receipts-payer") { S.receiptsFilter.payer = el.dataset.payer; render(); }
