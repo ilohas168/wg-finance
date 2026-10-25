@@ -42,7 +42,7 @@ pytest --cov=app --cov-report=term-missing
 | `GOOGLE_CREDENTIALS_JSON` | Path to Google service account key JSON | `credentials.json` |
 
 ## Phone app (replaces the Streamlit dashboard)
-`public/` is a no-build PWA (HTML/CSS/JS) and `api/index.py` its FastAPI JSON
+`frontend/` is a no-build PWA (HTML/CSS/JS) and `api/index.py` its FastAPI JSON
 API; both deploy to Vercel (`vercel.json`). Run locally with
 `uvicorn api.index:app --reload` and see `WEBAPP.md` for deployment.
 

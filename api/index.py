@@ -1,12 +1,12 @@
 """JSON API for the WG Finance phone app (deployed as a Vercel Python function).
 
-The phone app in ``public/`` talks only to this API. All money maths comes
+The phone app in ``frontend/`` talks only to this API. All money maths comes
 from ``app.services.ledger_math`` (integer cents, tested), storage is the
 existing Google Sheet via ``app.services.ledger``, logins use the Sheet's
 ``Users`` tab via ``app.services.auth``, and receipt photos are read by the
 existing Groq parser.
 
-Run locally (also serves the app from ``public/``)::
+Run locally (also serves the app from ``frontend/``)::
 
     uvicorn api.index:app --reload --port 8000
 """
@@ -406,7 +406,9 @@ def _sheet_rows(body: ReceiptIn) -> tuple[dict[str, Any], list[dict[str, Any]]]:
 
 @router.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    # "app" lets you confirm in a browser that Vercel runs this API (and not,
+    # say, the Telegram bot in app/main.py, which is also a FastAPI app).
+    return {"status": "ok", "app": "wg-finance-web"}
 
 
 @router.post("/login")
@@ -516,19 +518,33 @@ def add_settlement(body: SettlementIn, user: dict = Depends(current_user)) -> di
 app.include_router(router, prefix="/api")
 app.include_router(router)
 
-# Serve the phone app from public/ for any request that reaches this
-# function (local development, or if the platform routes static paths here
-# instead of serving them from its CDN). API routes above take precedence.
-_PUBLIC = ROOT / "public"
+# Serve the phone app. It lives in frontend/ (not public/) on purpose: for
+# FastAPI projects Vercel moves public/** to its CDN and leaves it out of the
+# function, so "/" had no page. Serving from the function always works, and
+# the Cache-Control headers still let Vercel's edge cache the files.
+_FRONTEND = ROOT / "frontend"
 _MEDIA_TYPES = {".webmanifest": "application/manifest+json", ".js": "text/javascript"}
+_NO_CACHE = {"index.html", "sw.js"}
 
-if _PUBLIC.is_dir():
 
-    @app.get("/{path:path}", include_in_schema=False)
-    def _static(path: str):
-        target = (_PUBLIC / path).resolve()
-        if path and target.is_file() and _PUBLIC in target.parents:
-            return FileResponse(target, media_type=_MEDIA_TYPES.get(target.suffix))
-        if path.startswith("api/"):
-            raise HTTPException(status_code=404, detail="Not found")
-        return FileResponse(_PUBLIC / "index.html")
+def _frontend_file(target: Path) -> FileResponse:
+    cache = (
+        "no-cache"
+        if target.name in _NO_CACHE
+        else "public, max-age=300, s-maxage=300, stale-while-revalidate=86400"
+    )
+    return FileResponse(
+        target,
+        media_type=_MEDIA_TYPES.get(target.suffix),
+        headers={"Cache-Control": cache},
+    )
+
+
+@app.get("/{path:path}", include_in_schema=False)
+def _static(path: str):
+    target = (_FRONTEND / path).resolve()
+    if path and target.is_file() and _FRONTEND in target.parents:
+        return _frontend_file(target)
+    if path.startswith("api/") or not (_FRONTEND / "index.html").is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    return _frontend_file(_FRONTEND / "index.html")
