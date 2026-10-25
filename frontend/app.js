@@ -272,34 +272,44 @@ function homeScreen() {
   const month = thisMonth();
   const p = d.periods[month] || { total_paid: 0, people: {}, receipts: 0 };
   const last = d.periods[shiftMonth(month, -1)];
-  let hero;
+  const change = last && last.total_paid > 0 ? Math.round(((p.total_paid - last.total_paid) / last.total_paid) * 100) : null;
+  const mine = me ? p.people[me] || { share: 0, paid: 0 } : null;
+  const lastMine = me && last ? last.people[me]?.share || 0 : 0;
+  // How far through the month we are, so the spending number has context.
+  const now = new Date();
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const monthPct = Math.round((now.getDate() / daysInMonth) * 100);
+  const monthName = now.toLocaleDateString("en-GB", { month: "long" });
+  const progress = `<div class="month-progress" role="progressbar" aria-valuenow="${monthPct}" aria-valuemin="0" aria-valuemax="100">
+      <div style="width:${monthPct}%"></div></div>
+    <div class="hint">Day ${now.getDate()} of ${daysInMonth} · ${monthPct}% of ${esc(monthName)} has passed</div>`;
+  const hero = me
+    ? `<div class="hero"><div class="label">Your expenses in ${esc(monthName)}</div>
+        <div class="big num">${chf(mine.share)}</div>
+        <div class="hint">Your share of everything bought${lastMine ? ` · ${chf(lastMine)} last month` : ""}</div>
+        ${progress}</div>`
+    : `<div class="hero"><div class="label">Household spent in ${esc(monthName)}</div>
+        <div class="big num">${chf(p.total_paid)}</div>${progress}</div>`;
+  let balanceTile = "";
   if (me) {
     const bal = d.balances[me];
-    hero = bal > 0.004
-      ? `<div class="hero good"><div class="label">Your balance</div><div class="big">${chf(bal)}</div><div class="hint">Your roommates owe you this.</div></div>`
-      : bal < -0.004
-        ? `<div class="hero bad"><div class="label">Your balance</div><div class="big">${chf(-bal)}</div><div class="hint">You owe this — see Settle up below.</div></div>`
-        : `<div class="hero"><div class="label">Your balance</div><div class="big">All square ✓</div><div class="hint">Nobody owes anybody.</div></div>`;
-  } else {
-    hero = `<div class="hero"><div class="label">Household</div><div class="big">${chf(p.total_paid)}</div><div class="hint">spent in ${esc(monthLabel(month))}</div></div>`;
+    const [cls, note] = bal > 0.004 ? ["good", "others owe you"] : bal < -0.004 ? ["bad", "you owe — settle up below"] : ["", "all square ✓"];
+    balanceTile = `<a class="tile" href="#/balances" style="color:inherit"><div class="label">Your balance ›</div>
+      <div class="value amount ${cls}">${chf(Math.abs(bal))}</div><div class="note">${note}</div></a>`;
   }
-  const change = last && last.total_paid > 0 ? Math.round(((p.total_paid - last.total_paid) / last.total_paid) * 100) : null;
-  const mine = me ? p.people[me] : null;
   const recent = d.receipts.slice(0, 5);
   return `${topbar(`Hi ${S.name || ""} 👋`, new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" }),
       `<div class="row" style="gap:8px"><button class="icon-btn" data-action="refresh" aria-label="Refresh">↻</button>
        <a class="icon-btn" href="#/settings" aria-label="Settings">⚙️</a></div>`)}
     ${hero}
-    <div class="section-title">Settle up</div>
-    ${d.settle_up.length ? `<div class="list">${settleRows(d.settle_up)}</div>` : `<div class="card muted">Everyone is square 🎉</div>`}
-    <div class="section-title">${esc(monthLabel(month))}</div>
-    <div class="grid-2">
+    <div class="grid-2" style="margin-top:10px">
+      ${balanceTile}
       <div class="tile"><div class="label">Household spent</div><div class="value num">${chf(p.total_paid)}</div>
         <div class="note">${change === null ? `${p.receipts} receipt(s)` : `${change >= 0 ? "▲" : "▼"} ${Math.abs(change)}% vs last month`}</div></div>
-      <div class="tile"><div class="label">${me ? "Your share" : "Receipts"}</div>
-        <div class="value num">${me ? chf(mine?.share || 0) : p.receipts}</div>
-        <div class="note">${me ? `you paid ${chf(mine?.paid || 0)}` : "this month"}</div></div>
+      ${me ? "" : `<div class="tile"><div class="label">Receipts</div><div class="value">${p.receipts}</div><div class="note">this month</div></div>`}
     </div>
+    <div class="section-title">Settle up</div>
+    ${d.settle_up.length ? `<div class="list">${settleRows(d.settle_up)}</div>` : `<div class="card muted">Everyone is square 🎉</div>`}
     <div class="section-title row" style="justify-content:space-between"><span>Recent</span><a href="#/receipts" class="small" style="text-transform:none;letter-spacing:0">See all</a></div>
     ${recent.length ? `<div class="list">${recent.map((r) => receiptRow(r)).join("")}</div>`
       : `<div class="card empty"><div class="big">🧾</div>No receipts yet. Tap + to add one.</div>`}`;
@@ -329,19 +339,29 @@ function monthPicker(target) {
   const first = known.reduce((a, b) => (b < a ? b : a), now);
   const years = [];
   for (let y = Number(now.slice(0, 4)); y >= Number(first.slice(0, 4)); y--) years.push(y);
-  const cell = (month) => {
-    const total = S.data.periods[month]?.total_paid || 0;
-    const future = month > now;
-    const name = new Date(Number(month.slice(0, 4)), Number(month.slice(5)) - 1, 1).toLocaleDateString("en-GB", { month: "short" });
-    return `<button class="month-cell ${month === current ? "on" : ""} ${total ? "" : "empty-month"}"
-      data-action="set-month" data-target="${target}" data-month="${month}" ${future ? "disabled" : ""}>
-      <span>${esc(name)}</span><small class="num">${total ? Math.round(total) : "–"}</small></button>`;
+  // Newest first, both for years and for the months inside each year.
+  // The number is the logged-in person's share (household total otherwise).
+  const me = S.data.me;
+  const amountFor = (month) => {
+    const period = S.data.periods[month];
+    return me ? period?.people[me]?.share || 0 : period?.total_paid || 0;
   };
+  const cell = (month) => {
+    const amount = amountFor(month);
+    const name = new Date(Number(month.slice(0, 4)), Number(month.slice(5)) - 1, 1).toLocaleDateString("en-GB", { month: "short" });
+    return `<button class="month-cell ${month === current ? "on" : ""} ${amount ? "" : "empty-month"}"
+      data-action="set-month" data-target="${target}" data-month="${month}">
+      <span>${esc(name)}</span><small class="num">${amount ? Math.round(amount) : "–"}</small></button>`;
+  };
+  const monthsOf = (y) => Array.from({ length: 12 }, (_, i) => `${y}-${String(12 - i).padStart(2, "0")}`)
+    .filter((m) => m <= now);
   openSheet(`<h2>Choose a month</h2>
     <button class="btn ${current === "all" ? "primary" : ""}" data-action="set-month" data-target="${target}" data-month="all">All time</button>
     ${years.map((y) => `<div class="section-title">${y}</div><div class="month-grid">${
-      Array.from({ length: 12 }, (_, i) => cell(`${y}-${String(i + 1).padStart(2, "0")}`)).join("")}</div>`).join("")}
-    <p class="muted small" style="margin:12px 4px 0">Numbers show CHF spent that month.</p>`);
+      monthsOf(y).map(cell).join("")}</div>`).join("")}
+    <p class="muted small" style="margin:12px 4px 0">${me
+      ? `Numbers show <b>your share</b> (${esc(me)}) in CHF for each month.`
+      : "Numbers show CHF spent by the household each month."}</p>`);
 }
 
 function filteredReceipts() {
@@ -677,7 +697,7 @@ function balancesScreen() {
       <div class="kv"><span class="k"><b>= Balance</b></span><b class="num">${signed(d.balances[n])}</b></div></div>`;
   }).join("");
   return `${topbar("Balances", "Who owes whom right now", `<button class="icon-btn" data-action="refresh" aria-label="Refresh">↻</button>`)}
-    ${Math.abs(d.unallocated) > 0.009 ? `<div class="banner warn" style="margin-bottom:10px">⚠ Some receipts' items don't add up to their totals (${chf(Math.abs(d.unallocated))} unassigned). Fix the ⚠ receipts so balances add up.</div>` : ""}
+    ${Math.abs(d.unallocated) > 0.009 ? `<button class="banner warn banner-btn" data-action="receipts-sheet" data-period="all" data-mismatch="1" style="margin-bottom:10px">⚠ ${d.receipts.filter((r) => r.mismatch).length} receipt(s) don't add up to their totals (${chf(Math.abs(d.unallocated))} unassigned). <b>Tap to fix them ›</b></button>` : ""}
     <div class="list">${cards}</div>
     <div class="section-title">Settle up</div>
     ${d.settle_up.length ? `<div class="list">${settleRows(d.settle_up)}</div><p class="muted small" style="margin:8px 4px">Tap “Paid” after sending the money — it's recorded and balances update.</p>`
@@ -764,9 +784,10 @@ function trendChart(endMonth) {
 
 // Bottom sheet listing every receipt in a period (optionally one payer's),
 // newest first; each row opens the receipt, the pencil opens the editor.
-function receiptsSheet(period, payer) {
+function receiptsSheet(period, payer, onlyMismatched = false) {
   const list = S.data.receipts.filter((r) =>
-    (period === "all" || (r.date || "").startsWith(period)) && (!payer || r.payer === payer));
+    (period === "all" || (r.date || "").startsWith(period)) && (!payer || r.payer === payer) &&
+    (!onlyMismatched || r.mismatch || !r.payer));
   const total = list.reduce((sum, r) => sum + cents(r.total), 0) / 100;
   const rows = list.map((r) => `<div class="list-item">
       <a class="row grow" href="#/receipt/${encodeURIComponent(r.id)}" style="color:inherit;gap:12px;min-width:0">
@@ -776,7 +797,8 @@ function receiptsSheet(period, payer) {
         <div class="amount">${chf(r.total)}</div></a>
       <a class="icon-btn" href="#/edit/${encodeURIComponent(r.id)}" aria-label="Edit ${esc(r.store)}">✏️</a>
     </div>`).join("");
-  openSheet(`<h2>${payer ? `Paid by ${esc(payer)} · ` : "Receipts · "}${esc(monthLabel(period))}</h2>
+  openSheet(`<h2>${onlyMismatched ? "Receipts to fix · " : payer ? `Paid by ${esc(payer)} · ` : "Receipts · "}${esc(monthLabel(period))}</h2>
+    ${onlyMismatched ? `<p class="small muted" style="margin:-6px 0 8px">Their items don't add up to the printed total (or the payer is unknown). Tap ✏️ to fix the items or the total.</p>` : ""}
     <p class="muted" style="margin:-6px 0 12px">${list.length} receipt(s) · <b>${chf(total)}</b></p>
     ${list.length ? `<div class="list">${rows}</div>` : `<div class="card empty">No receipts in this period.</div>`}
     <button class="btn" data-action="close-sheet" style="margin-top:12px">Close</button>`);
@@ -803,9 +825,9 @@ function statsScreen() {
       <div class="tile"><div class="label">Spent</div><div class="value num" style="font-size:1.05rem">${chf(p.total_paid)}</div></div>
       <button class="tile tile-btn" data-action="receipts-sheet" data-period="${month}">
         <div class="label">Receipts ›</div><div class="value">${p.receipts}</div></button>
-      <div class="tile"><div class="label">Per person</div><div class="value num" style="font-size:1.05rem">${chf(p.total_share / 3)}</div></div>
+      <div class="tile"><div class="label">Avg. / person</div><div class="value num" style="font-size:1.05rem">${chf(p.total_share / 3)}</div><div class="note">total ÷ 3</div></div>
     </div>
-    ${p.mismatched.length ? `<div class="banner warn" style="margin-top:10px">⚠ ${p.mismatched.length} receipt(s) here don't add up — “paid” and “share” totals differ.</div>` : ""}
+    ${p.mismatched.length ? `<button class="banner warn banner-btn" data-action="receipts-sheet" data-period="${month}" data-mismatch="1" style="margin-top:10px">⚠ ${p.mismatched.length} receipt(s) here don't add up — “paid” and “share” totals differ. <b>Tap to fix ›</b></button>` : ""}
     <div class="section-title">Who spent how much</div>
     <div class="stack">${people}</div>
     <div class="section-title">Categories</div>
@@ -863,7 +885,7 @@ document.addEventListener("click", async (e) => {
     if (key) S.statsMonth = next; else S.receiptsFilter.month = next;
     render();
   }
-  else if (a === "receipts-sheet") { receiptsSheet(el.dataset.period, el.dataset.payer); }
+  else if (a === "receipts-sheet") { receiptsSheet(el.dataset.period, el.dataset.payer, el.dataset.mismatch === "1"); }
   else if (a === "pick-month") { monthPicker(el.dataset.target); }
   else if (a === "set-month") {
     if (el.dataset.target === "stats-month") S.statsMonth = el.dataset.month;
