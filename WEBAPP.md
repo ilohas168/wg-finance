@@ -6,13 +6,13 @@ reader and money maths as before.
 
 ```
 vercel.json      Vercel Services config: one public service, "web"
-public/          the app the phone loads (HTML/CSS/JS, served from a CDN)
+frontend/        the app the phone loads (HTML/CSS/JS), served by the API function
 api/index.py     the JSON API (FastAPI) — runs as one Vercel Python function
 app/services/    shared code: Google Sheets, logins, ledger maths, Groq parser
 ```
 
-- **No sleep mode.** The app itself is static files on Vercel's CDN, so it
-  opens instantly. The API starts on demand in about a second; there is no
+- **No sleep mode.** The app files are cached by Vercel's edge network and
+  by the phone itself, so it opens instantly. The API starts on demand in about a second; there is no
   30-second "waking up" screen.
 - **Works like an app.** Bottom tab bar, big buttons, camera capture,
   stays logged in, opens offline with the last loaded data.
@@ -25,7 +25,7 @@ app/services/    shared code: Google Sheets, logins, ledger maths, Groq parser
 2. Import `ilohas168/wg-finance`. Set the **Framework Preset** to
    **Services** and leave the root directory as `./`. The repo's
    `vercel.json` defines one service, `web` (the FastAPI app in
-   `api/index.py`, which also serves the phone app from `public/`), and
+   `api/index.py`, which also serves the phone app from `frontend/`), and
    routes all traffic to it.
 3. Under **Environment Variables**, add the same secrets the Streamlit app has:
 
