@@ -13,6 +13,7 @@ import binascii
 import json
 import logging
 import os
+import sys
 import threading
 from collections.abc import Mapping
 from datetime import datetime
@@ -62,6 +63,10 @@ def _get_streamlit_secret(name: str) -> Any:
     ``st.secrets`` can raise when a local Streamlit installation has no
     secrets.toml configured, so reading it must remain optional for the bot.
     """
+    # Only consult Streamlit when it is already running this process. The web
+    # API and the Telegram bot must not pay for importing Streamlit.
+    if "streamlit" not in sys.modules:
+        return None
     try:
         import streamlit as st  # type: ignore[import-not-found]
         return st.secrets.get(name)
