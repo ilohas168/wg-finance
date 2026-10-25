@@ -289,6 +289,7 @@ a { color: var(--accent); text-decoration: none; }
 /* While a sheet is open the page behind is pinned in place (position:
    fixed is the only lock iOS Safari honours); JS restores the scroll spot. */
 body.sheet-open { position: fixed; left: 0; right: 0; overflow: hidden; }
+html:has(body.sheet-open) { overflow: hidden; overscroll-behavior: none; }
 .sheet .grabber { flex: none; width: 40px; height: 5px; border-radius: 3px; background: var(--ink-3); opacity: 0.4; margin: 0 auto 12px; }
 .sheet h2 { margin: 0 0 12px; font-size: 1.2rem; }
 @keyframes up { from { transform: translateY(100%); } to { transform: none; } }
