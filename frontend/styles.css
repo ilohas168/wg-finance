@@ -155,7 +155,17 @@ a { color: var(--accent); text-decoration: none; }
 .month-switch { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--surface); border-radius: 14px; box-shadow: var(--shadow); padding: 6px; }
 .month-switch button { border: 0; background: var(--surface-2); border-radius: 10px; min-width: 44px; height: 40px; font-size: 1.1rem; cursor: pointer; }
 .month-switch button:disabled { opacity: 0.35; }
-.month-switch .label { font-weight: 700; text-align: center; flex: 1; }
+.month-switch .label { font-weight: 700; text-align: center; flex: 1; background: none; font-size: 1rem; }
+.month-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.month-cell {
+  display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 4px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface); cursor: pointer; font-weight: 600;
+}
+.month-cell small { font-weight: 500; color: var(--ink-3); font-size: 0.75rem; }
+.month-cell.empty-month { color: var(--ink-3); }
+.month-cell.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.month-cell.on small { color: rgba(255, 255, 255, 0.85); }
+.month-cell:disabled { opacity: 0.35; }
 .month-switch .all { font-size: 0.85rem; padding: 0 12px; }
 .chips { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 6px; scrollbar-width: none; }
 .chips::-webkit-scrollbar { display: none; }
