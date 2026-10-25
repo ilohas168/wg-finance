@@ -11,3 +11,6 @@ dist/
 build/
 .venv/
 venv/
+
+# Deployment config is not a secret.
+!vercel.json

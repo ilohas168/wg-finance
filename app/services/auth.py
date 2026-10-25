@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 RESULT_OK = "ok"            # credentials valid — returns display name.
 RESULT_BAD_CREDS = "bad_creds"   # user not found or wrong password.
 RESULT_DB_ERROR = "db_error"     # couldn't connect / read Users sheet.
+RESULT_BUSY = "busy"             # Google's per-minute request quota ran out.
 
 # Temporary default passwords — users should change these on first login.
 _DEFAULT_PASSWORDS = {
@@ -125,21 +126,31 @@ def _get_users_df() -> Optional[List[list]]:
     # Lazy import to avoid circular dependency and support standalone auth imports.
     from app.services.ledger import _open_sheet
 
+    from app.services.ledger import SheetsBusyError, is_rate_limited
+
     try:
         spreadsheet = _open_sheet()
-    except Exception:
+    except Exception as exc:
+        if is_rate_limited(exc):
+            raise SheetsBusyError("Google Sheets is busy (too many requests).") from exc
         logger.warning("Could not connect to Google Sheets for user lookup.")
         return None
 
     try:
         ws = spreadsheet.worksheet("Users")
     except Exception as exc:
+        if is_rate_limited(exc):
+            raise SheetsBusyError("Google Sheets is busy (too many requests).") from exc
         logger.warning("Users worksheet is unavailable: %s", exc)
         return None
 
     try:
         values = ws.get_all_values()
-    except Exception:
+    except Exception as exc:
+        from app.services.ledger import SheetsBusyError, is_rate_limited
+
+        if is_rate_limited(exc):
+            raise SheetsBusyError("Google Sheets is busy (too many requests).") from exc
         logger.warning("Could not read Users worksheet values.")
         return None
 
@@ -159,13 +170,24 @@ def verify_user(username: str, password: str) -> Tuple[str, Optional[str]]:
     * ``(RESULT_OK, display_name)`` — login succeeded.
     * ``(RESULT_BAD_CREDS, None)``  — wrong username or password.
     * ``(RESULT_DB_ERROR, message)`` — couldn't reach the Users worksheet.
+    * ``(RESULT_BUSY, message)`` — Google's request quota is used up; retry shortly.
 
     Connection failures are **never** mistaken for bad credentials.
     """
-    # Ensure the Users sheet is seeded before attempting login.
-    _ensure_users_sheet()
+    from app.services.ledger import SheetsBusyError
 
-    values = _get_users_df()
+    try:
+        values = _get_users_df()
+        # Only create/seed the Users sheet when it is missing or empty, so a
+        # normal login costs one sheet read instead of several.
+        if values is None or len(values) < 2:
+            _ensure_users_sheet()
+            values = _get_users_df()
+    except SheetsBusyError:
+        return RESULT_BUSY, (
+            "Google Sheets is busy right now (too many requests in the last minute). "
+            "Wait a moment and try again."
+        )
     if values is None:
         return RESULT_DB_ERROR, (
             "Unable to connect to Google Sheets authentication table. "
@@ -214,9 +236,12 @@ def change_password(username: str, old_password: str, new_password: str) -> Tupl
 
     Returns ``(success: bool, message: str)``.
     """
-    _ensure_users_sheet()
+    from app.services.ledger import SheetsBusyError
 
-    values = _get_users_df()
+    try:
+        values = _get_users_df()
+    except SheetsBusyError:
+        return False, "Google Sheets is busy right now. Wait a moment and try again."
     if values is None:
         return False, "Unable to connect to Google Sheets authentication table."
 
