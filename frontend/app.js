@@ -155,9 +155,11 @@ function openSheet(html) {
   const root = document.getElementById("sheet-root");
   root.innerHTML = `<div class="sheet-backdrop" data-action="close-sheet"></div>
     <div class="sheet" role="dialog" aria-modal="true"><div class="grabber"></div>${html}</div>`;
+  document.body.classList.add("sheet-open");
 }
 function closeSheet() {
   document.getElementById("sheet-root").innerHTML = "";
+  document.body.classList.remove("sheet-open");
 }
 
 // ------------------------------------------------------------------------- //

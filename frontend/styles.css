@@ -270,8 +270,14 @@ a { color: var(--accent); text-decoration: none; }
 .sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 41; max-width: 560px; margin: 0 auto;
   background: var(--bg); border-radius: 22px 22px 0 0; padding: 10px 16px calc(20px + var(--safe-b));
-  max-height: 90dvh; overflow-y: auto; animation: up 0.2s ease-out;
+  /* vh first: older iOS/Android browsers ignore dvh, and without any
+     limit a long sheet grew past the top of the screen and could not scroll. */
+  max-height: 85vh; max-height: 90dvh;
+  overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y;
+  animation: up 0.2s ease-out;
 }
+/* While a sheet is open the page behind it must not move. */
+body.sheet-open { overflow: hidden; }
 .sheet .grabber { width: 40px; height: 5px; border-radius: 3px; background: var(--ink-3); opacity: 0.4; margin: 0 auto 12px; }
 .sheet h2 { margin: 0 0 12px; font-size: 1.2rem; }
 @keyframes up { from { transform: translateY(100%); } to { transform: none; } }
