@@ -1,6 +1,6 @@
 // Service worker: makes the app open instantly (and offline) from the home screen.
 // App files: served from cache, refreshed in the background. API calls: always network.
-const CACHE = "wg-finance-v3";
+const CACHE = "wg-finance-v4";
 const SHELL = ["/", "/index.html", "/app.js", "/styles.css", "/manifest.webmanifest", "/icons/icon.svg"];
 
 self.addEventListener("install", (event) => {

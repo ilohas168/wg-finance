@@ -118,6 +118,9 @@ a { color: var(--accent); text-decoration: none; }
 /* ---------- Stats tiles ---------- */
 .tile { background: var(--surface); border-radius: 14px; padding: 12px 14px; box-shadow: var(--shadow); }
 .tile .label { font-size: 0.78rem; color: var(--ink-3); }
+.tile-btn { border: 0; text-align: left; cursor: pointer; font: inherit; color: inherit; }
+.tile-btn .label { color: var(--accent); font-weight: 600; }
+.link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
 .tile .value { font-size: 1.25rem; font-weight: 750; margin-top: 2px; white-space: nowrap; }
 .grid-3 .tile { padding: 10px; }
 .grid-3 .tile .value { font-size: 1rem; }

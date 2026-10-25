@@ -762,6 +762,26 @@ function trendChart(endMonth) {
     <div class="legend">${ROOMMATES.map((n) => `<span><i style="--c:${COLOR[n]}"></i>${esc(n)}</span>`).join("")}</div>`;
 }
 
+// Bottom sheet listing every receipt in a period (optionally one payer's),
+// newest first; each row opens the receipt, the pencil opens the editor.
+function receiptsSheet(period, payer) {
+  const list = S.data.receipts.filter((r) =>
+    (period === "all" || (r.date || "").startsWith(period)) && (!payer || r.payer === payer));
+  const total = list.reduce((sum, r) => sum + cents(r.total), 0) / 100;
+  const rows = list.map((r) => `<div class="list-item">
+      <a class="row grow" href="#/receipt/${encodeURIComponent(r.id)}" style="color:inherit;gap:12px;min-width:0">
+        ${r.manual ? `<span class="avatar" style="--c:var(--surface-2);color:var(--ink)">✍️</span>` : avatar(r.payer)}
+        <div class="grow"><div class="title">${esc(r.store)}</div>
+          <div class="meta">${esc(dayLabel(r.date))} · ${esc(r.payer || "⚠ unknown")}${r.mismatch ? " · ⚠" : ""}</div></div>
+        <div class="amount">${chf(r.total)}</div></a>
+      <a class="icon-btn" href="#/edit/${encodeURIComponent(r.id)}" aria-label="Edit ${esc(r.store)}">✏️</a>
+    </div>`).join("");
+  openSheet(`<h2>${payer ? `Paid by ${esc(payer)} · ` : "Receipts · "}${esc(monthLabel(period))}</h2>
+    <p class="muted" style="margin:-6px 0 12px">${list.length} receipt(s) · <b>${chf(total)}</b></p>
+    ${list.length ? `<div class="list">${rows}</div>` : `<div class="card empty">No receipts in this period.</div>`}
+    <button class="btn" data-action="close-sheet" style="margin-top:12px">Close</button>`);
+}
+
 function statsScreen() {
   const month = S.statsMonth;
   const p = S.data.periods[month] || { receipts: 0, total_paid: 0, total_share: 0, people: {}, categories: [], stores: [], mismatched: [] };
@@ -773,7 +793,7 @@ function statsScreen() {
     const pct = p.total_share ? Math.round((x.share / p.total_share) * 100) : 0;
     return `<div class="card"><div class="row">${avatar(n)}<div class="grow"><b>${esc(n)}</b><div>${pill}</div></div></div>
       <div class="grid-2" style="margin-top:10px">
-        <div><div class="muted small">Paid at the till</div><div class="amount" style="font-size:1.15rem">${chf(x.paid)}</div><div class="muted small">${x.receipts_paid} receipt(s)</div></div>
+        <div><div class="muted small">Paid at the till</div><div class="amount" style="font-size:1.15rem">${chf(x.paid)}</div><button class="link small" data-action="receipts-sheet" data-period="${month}" data-payer="${n}">${x.receipts_paid} receipt(s) ›</button></div>
         <div><div class="muted small">Their share</div><div class="amount" style="font-size:1.15rem">${chf(x.share)}</div><div class="muted small">${pct}% of the total</div></div>
       </div></div>`;
   }).join("");
@@ -781,7 +801,8 @@ function statsScreen() {
     ${monthSwitch(month, "stats-month")}
     <div class="grid-3" style="margin-top:10px">
       <div class="tile"><div class="label">Spent</div><div class="value num" style="font-size:1.05rem">${chf(p.total_paid)}</div></div>
-      <div class="tile"><div class="label">Receipts</div><div class="value">${p.receipts}</div></div>
+      <button class="tile tile-btn" data-action="receipts-sheet" data-period="${month}">
+        <div class="label">Receipts ›</div><div class="value">${p.receipts}</div></button>
       <div class="tile"><div class="label">Per person</div><div class="value num" style="font-size:1.05rem">${chf(p.total_share / 3)}</div></div>
     </div>
     ${p.mismatched.length ? `<div class="banner warn" style="margin-top:10px">⚠ ${p.mismatched.length} receipt(s) here don't add up — “paid” and “share” totals differ.</div>` : ""}
@@ -842,6 +863,7 @@ document.addEventListener("click", async (e) => {
     if (key) S.statsMonth = next; else S.receiptsFilter.month = next;
     render();
   }
+  else if (a === "receipts-sheet") { receiptsSheet(el.dataset.period, el.dataset.payer); }
   else if (a === "pick-month") { monthPicker(el.dataset.target); }
   else if (a === "set-month") {
     if (el.dataset.target === "stats-month") S.statsMonth = el.dataset.month;
@@ -938,6 +960,7 @@ document.addEventListener("submit", async (e) => {
 });
 
 window.addEventListener("hashchange", () => { closeSheet(); render(); window.scrollTo(0, 0); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSheet(); });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && Date.now() - S.loadedAt > REFRESH_AFTER_MS) load();
 });
