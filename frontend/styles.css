@@ -246,11 +246,14 @@ a { color: var(--accent); text-decoration: none; }
 .bar { height: 12px; border-radius: 6px; background: var(--surface-2); overflow: hidden; }
 .bar > div { height: 100%; border-radius: 6px; background: var(--c, #6250d6); }
 .scope-switch { margin: 22px 0 -8px; }
-.trend { display: flex; align-items: flex-end; gap: 8px; height: 140px; padding-top: 8px; }
-.trend .col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; gap: 1px; height: 100%; }
-.trend .seg-bar { border-radius: 3px; min-height: 0; }
+.trend { display: flex; gap: 8px; height: 150px; padding-top: 4px; }
+.trend .month-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+/* Amount sits directly on top of its bar: both are pushed to the bottom. */
+.trend .col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; min-height: 0; }
+.trend .bar-stack { display: flex; flex-direction: column; gap: 1px; }
+.trend .seg-bar { border-radius: 3px; min-height: 2px; }
 .trend .lbl { font-size: 0.7rem; color: var(--ink-3); text-align: center; margin-top: 4px; }
-.trend .tot { font-size: 0.68rem; color: var(--ink-3); text-align: center; margin-bottom: 2px; }
+.trend .tot { font-size: 0.72rem; font-weight: 650; color: var(--ink-2); text-align: center; margin-bottom: 3px; }
 .legend { display: flex; gap: 14px; font-size: 0.8rem; color: var(--ink-2); margin-top: 10px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; background: var(--c); margin-right: 5px; }
 

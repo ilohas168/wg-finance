@@ -805,14 +805,19 @@ function trendChart(endMonth, person = null) {
   const max = Math.max(...totals, 1);
   return `<div class="trend">${months.map((mo, i) => {
       const p = S.data.periods[mo];
+      // Pixel heights (the tallest month gets BAR_MAX px) leave room for the
+      // amount, which sits directly on top of each bar.
+      const BAR_MAX = 104;
       const segs = who.slice().reverse().map((n) => {
         const v = p?.people[n]?.share || 0;
-        return v > 0 ? `<div class="seg-bar" style="height:${(v / max) * 100}%;background:${COLOR[n]}" title="${esc(n)} ${chf(v)}"></div>` : "";
+        return v > 0 ? `<div class="seg-bar" style="height:${Math.max(2, Math.round((v / max) * BAR_MAX))}px;background:${COLOR[n]}" title="${esc(n)} ${chf(v)}"></div>` : "";
       }).join("");
       const [y, mm] = mo.split("-").map(Number);
-      return `<div style="flex:1;display:flex;flex-direction:column;height:100%">
-        <div class="tot">${totals[i] ? Math.round(totals[i]) : ""}</div>
-        <div class="col">${segs}</div>
+      return `<div class="month-col">
+        <div class="col">
+          ${totals[i] ? `<div class="tot num">${Math.round(totals[i])}</div>` : ""}
+          <div class="bar-stack">${segs}</div>
+        </div>
         <div class="lbl">${new Date(y, mm - 1, 1).toLocaleDateString("en-GB", { month: "short" })}</div></div>`;
     }).join("")}</div>
     <div class="legend">${who.map((n) => `<span><i style="--c:${COLOR[n]}"></i>${esc(person ? `Your share (${n})` : n)}</span>`).join("")}</div>`;
