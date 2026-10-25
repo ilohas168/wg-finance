@@ -697,7 +697,7 @@ function balancesScreen() {
       <div class="kv"><span class="k"><b>= Balance</b></span><b class="num">${signed(d.balances[n])}</b></div></div>`;
   }).join("");
   return `${topbar("Balances", "Who owes whom right now", `<button class="icon-btn" data-action="refresh" aria-label="Refresh">↻</button>`)}
-    ${Math.abs(d.unallocated) > 0.009 ? `<button class="banner warn banner-btn" data-action="receipts-sheet" data-period="all" data-mismatch="1" style="margin-bottom:10px">⚠ ${d.receipts.filter((r) => r.mismatch).length} receipt(s) don't add up to their totals (${chf(Math.abs(d.unallocated))} unassigned). <b>Tap to fix them ›</b></button>` : ""}
+    ${Math.abs(d.unallocated) > 0.009 ? `<button class="banner warn banner-btn" data-action="receipts-sheet" data-period="all" data-mismatch="1" style="margin-bottom:10px">⚠ ${((n) => n === 1 ? "1 receipt doesn't" : `${n} receipts don't`)(d.receipts.filter((r) => r.mismatch).length)} add up to the total (${chf(Math.abs(d.unallocated))} unassigned). <b>Tap to fix ›</b></button>` : ""}
     <div class="list">${cards}</div>
     <div class="section-title">Settle up</div>
     ${d.settle_up.length ? `<div class="list">${settleRows(d.settle_up)}</div><p class="muted small" style="margin:8px 4px">Tap “Paid” after sending the money — it's recorded and balances update.</p>`
@@ -822,10 +822,10 @@ function statsScreen() {
   return `${topbar("Stats")}
     ${monthSwitch(month, "stats-month")}
     <div class="grid-3" style="margin-top:10px">
-      <div class="tile"><div class="label">Spent</div><div class="value num" style="font-size:1.05rem">${chf(p.total_paid)}</div></div>
-      <button class="tile tile-btn" data-action="receipts-sheet" data-period="${month}">
-        <div class="label">Receipts ›</div><div class="value">${p.receipts}</div></button>
-      <div class="tile"><div class="label">Avg. / person</div><div class="value num" style="font-size:1.05rem">${chf(p.total_share / 3)}</div><div class="note">total ÷ 3</div></div>
+      <div class="tile"><div class="label">Spent</div><div class="value num">${chf(p.total_paid)}</div></div>
+      <button class="tile tile-btn" data-action="receipts-sheet" data-period="${month}" aria-label="Show all receipts">
+        <div class="label">Receipts</div><div class="value">${p.receipts} <span class="chev">›</span></div></button>
+      <div class="tile"><div class="label">Ø per person</div><div class="value num">${chf(p.total_share / 3)}</div></div>
     </div>
     ${p.mismatched.length ? `<button class="banner warn banner-btn" data-action="receipts-sheet" data-period="${month}" data-mismatch="1" style="margin-top:10px">⚠ ${p.mismatched.length} receipt(s) here don't add up — “paid” and “share” totals differ. <b>Tap to fix ›</b></button>` : ""}
     <div class="section-title">Who spent how much</div>
