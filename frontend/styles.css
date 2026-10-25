@@ -114,6 +114,9 @@ a { color: var(--accent); text-decoration: none; }
 .hero .label { font-size: 0.9rem; opacity: 0.9; }
 .hero .big { font-size: 2.3rem; font-weight: 800; letter-spacing: -0.02em; margin: 4px 0; }
 .hero .hint { font-size: 0.9rem; opacity: 0.9; }
+.month-progress { height: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.28); overflow: hidden; margin: 14px 0 6px; }
+.month-progress > div { height: 100%; border-radius: 4px; background: #fff; }
+.banner-btn { display: block; width: 100%; text-align: left; border: 0; cursor: pointer; font: inherit; }
 
 /* ---------- Stats tiles ---------- */
 .tile { background: var(--surface); border-radius: 14px; padding: 12px 14px; box-shadow: var(--shadow); }
