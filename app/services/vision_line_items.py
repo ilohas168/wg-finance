@@ -11,7 +11,8 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Literal
+from datetime import date, timedelta
+from typing import Any, Dict, List, Literal, Optional
 
 import groq
 from pydantic import BaseModel, Field
@@ -56,6 +57,10 @@ class ItemizedReceipt(BaseModel):
     header_discounts: float = Field(default=0.0, description="Receipt-level subtotal discount.")
     merchant: str = Field(description="Store / merchant name.")
     date: str = Field(description="Purchase date in YYYY-MM-DD format.")
+    date_printed: str = Field(
+        default="",
+        description="The purchase date copied exactly as printed, e.g. 7.11.2026.",
+    )
     total_amount: float = Field(description="Grand total from the receipt footer.")
     items: List[LineItem] = Field(
         min_length=0, description="Extracted line-items (may be empty on poor OCR)."
@@ -96,15 +101,17 @@ Read the receipt carefully, especially the final amount at the bottom:
 - beneficiary is the only per-item allocation field: one of A, B, C, AB, BC,
   AC, or ALL. Default to ALL. Do not output a separate Shared/Private field.
 - category must be one of Food, Drink, Toiletries, Household, General.
-- For Swiss numeric dates, interpret the printed order as day.month.year
-  (DD.MM.YYYY), never month.day.year. For example, 12.9.2026 means
-  2026-09-12, not 2026-12-09.
-- Return date as YYYY-MM-DD; infer only when it is not printed.
+- date_printed: copy the purchase date character for character exactly as it
+  is printed (for example "7.11.2026" or "07.11.26"). Do not reorder it.
+- date: the same date as YYYY-MM-DD. Swiss receipts always print
+  day.month.year, never month.day.year: 7.11.2026 is 2026-11-07 (7 November),
+  12.9.2026 is 2026-09-12. Infer only when no date is printed.
 
 JSON shape:
 {
   "merchant": "store name",
-  "date": "2026-10-03",
+  "date": "2026-11-07",
+  "date_printed": "7.11.2026",
   "total_amount": 14.74,
   "header_discounts": 0.0,
   "items": [
@@ -155,6 +162,48 @@ def _image_data_url(image_bytes: bytes) -> str:
 # Public API                                                                   #
 # --------------------------------------------------------------------------- #
 
+_PRINTED_DATE = re.compile(r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4}|\d{2})(?!\d)")
+_ISO_DATE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})")
+
+
+def _make_date(year: int, month: int, day: int) -> Optional[date]:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def resolve_receipt_date(
+    printed: str, model_iso: str, today: Optional[date] = None
+) -> Optional[date]:
+    """Return the purchase date without the model's day/month mix-ups.
+
+    Vision models tend to convert "7.11.2026" the US way (month first) into
+    2026-07-11. So the printed text is read here instead, with the Swiss rule:
+    day.month.year, always. Only when nothing usable was printed is the
+    model's ISO date used; if that lies in the future but swapping day and
+    month gives a past date, it was almost certainly swapped, so swap it back.
+    """
+    today = today or date.today()
+    match = _PRINTED_DATE.search(printed or "")
+    if match:
+        day, month, year = (int(g) for g in match.groups())
+        if year < 100:
+            year += 2000
+        resolved = _make_date(year, month, day)
+        if resolved:
+            return resolved
+    match = _ISO_DATE.match((model_iso or "").strip())
+    if not match:
+        return None
+    year, month, day = (int(g) for g in match.groups())
+    resolved = _make_date(year, month, day)
+    swapped = _make_date(year, day, month) if day <= 12 and day != month else None
+    if resolved and resolved > today + timedelta(days=1) and swapped and swapped <= today:
+        return swapped
+    return resolved or swapped
+
+
 def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
     """Parse and validate a receipt with one Groq vision request.
 
@@ -196,6 +245,14 @@ def parse_itemized_receipt(image_bytes: bytes) -> ItemizedReceipt:
     if not content:
         raise ValueError("Groq returned no content for the receipt image.")
     receipt = ItemizedReceipt.model_validate_json(_strip_markdown_json(content))
+    resolved_date = resolve_receipt_date(receipt.date_printed, receipt.date)
+    if resolved_date:
+        if resolved_date.isoformat() != receipt.date:
+            logger.info(
+                "vision_line_items: date %r (printed %r) resolved to %s",
+                receipt.date, receipt.date_printed, resolved_date,
+            )
+        receipt.date = resolved_date.isoformat()
 
     # Compare totals locally and report discrepancies without another model call.
     item_total = round(
