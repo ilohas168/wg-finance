@@ -63,3 +63,53 @@ def test_image_data_url_preserves_png_bytes():
     assert vision_line_items._image_data_url(original_image) == (
         "data:image/png;base64," + base64.b64encode(original_image).decode("ascii")
     )
+
+
+import pytest
+from datetime import date
+
+
+@pytest.mark.parametrize(
+    "printed, model_iso, expected",
+    [
+        # The reported bug: the model turned 7.11.2026 into July 11.
+        ("7.11.2026", "2026-07-11", date(2026, 11, 7)),
+        ("07.11.2026", "2026-11-07", date(2026, 11, 7)),
+        ("12.9.26", "2026-12-09", date(2026, 9, 12)),
+        ("Datum: 03/10/2026 14:22", "2026-03-10", date(2026, 10, 3)),
+        ("31.10.2026", "2026-10-31", date(2026, 10, 31)),
+        # Nothing printed: trust the model, unless its date is in the future
+        # and swapping day/month gives a past date.
+        ("", "2026-10-31", date(2026, 10, 31)),
+        ("", "2026-12-07", date(2026, 7, 12)),
+        ("", "2026-07-11", date(2026, 7, 11)),
+        ("", "not a date", None),
+    ],
+)
+def test_receipt_dates_are_read_day_first(printed, model_iso, expected):
+    today = date(2026, 11, 7)
+    assert vision_line_items.resolve_receipt_date(printed, model_iso, today) == expected
+
+
+def test_parse_fixes_a_month_first_date_from_the_model(monkeypatch):
+    payload = {
+        "merchant": "Migros",
+        "date": "2026-07-11",          # what the model wrongly returned
+        "date_printed": "7.11.2026",   # what the receipt says
+        "total_amount": 3.5,
+        "items": [{"name": "Milch", "price": 3.5}],
+    }
+
+    class FakeClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    message = SimpleNamespace(content=json.dumps(payload))
+                    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    monkeypatch.setattr(vision_line_items, "_get_client", lambda: FakeClient())
+
+    receipt = vision_line_items.parse_itemized_receipt(b"\xff\xd8\xffjpeg")
+
+    assert receipt.date == "2026-11-07"
