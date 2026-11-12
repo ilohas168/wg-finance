@@ -207,6 +207,7 @@ a { color: var(--accent); text-decoration: none; }
 .btn.primary { background: var(--accent); color: var(--accent-ink); }
 .btn.danger { background: var(--bad-bg); color: var(--bad); }
 .btn.ghost { background: none; color: var(--accent); }
+.btn.outline { background: transparent; color: var(--accent); box-shadow: inset 0 0 0 1.5px var(--accent); }
 .btn.small { min-height: 36px; padding: 0 12px; border-radius: 10px; width: auto; font-size: 0.88rem; }
 .btn:disabled { opacity: 0.5; }
 

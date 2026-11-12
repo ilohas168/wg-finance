@@ -2,7 +2,7 @@
 // App files are loaded from the network first, so a new version shows up on
 // the very next launch; the cached copy is only used when offline.
 // API calls are never cached.
-const CACHE = "wg-finance-v11";
+const CACHE = "wg-finance-v12";
 const SHELL = ["/", "/index.html", "/app.js", "/styles.css", "/manifest.webmanifest", "/icons/icon.svg"];
 
 self.addEventListener("install", (event) => {

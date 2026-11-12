@@ -13,7 +13,7 @@ const CATEGORIES = ["Food", "Drink", "Toiletries", "Household", "General"];
 const METHODS = ["Twint", "Bank Transfer", "Cash"];
 const REFRESH_AFTER_MS = 60_000;
 // Shown in Settings so you can check the phone runs the latest version.
-const APP_VERSION = "11";
+const APP_VERSION = "12";
 
 const S = {
   token: localStorage.getItem("wg.token"),
@@ -309,7 +309,7 @@ function settleRows(steps, withButtons = true) {
       <span class="pair">${avatar(s.from, "sm")}${avatar(s.to, "sm")}</span>
       <div class="grow"><div class="title">${esc(s.from)} → ${esc(s.to)}</div>
         <div class="amount">${chf(s.amount)}</div></div>
-      ${withButtons ? `<button class="btn small primary" data-action="settle" data-from="${esc(s.from)}" data-to="${esc(s.to)}" data-amount="${s.amount}">Paid</button>` : ""}
+      ${withButtons ? `<button class="btn small outline" data-action="settle" data-from="${esc(s.from)}" data-to="${esc(s.to)}" data-amount="${s.amount}" aria-label="Record that ${esc(s.from)} paid ${esc(s.to)}">Paid…</button>` : ""}
     </div>`).join("");
 }
 
@@ -761,7 +761,7 @@ function balancesScreen() {
     </details>`;
 }
 
-function settleSheet({ from, to, amount } = {}) {
+function settleSheet({ from, to, amount, method } = {}) {
   const me = S.data.me;
   from = from || me || ROOMMATES[1];
   to = to || ROOMMATES.find((n) => n !== from);
@@ -770,30 +770,61 @@ function settleSheet({ from, to, amount } = {}) {
       <div class="field"><span>Who paid?</span>${segButtons("settle-from", ROOMMATES.map((n) => [n, n]), from)}</div>
       <div class="field"><span>To whom?</span>${segButtons("settle-to", ROOMMATES.map((n) => [n, n]), to)}</div>
       <label class="field"><span>Amount (CHF)</span><input class="input money" name="amount" inputmode="decimal" value="${amount ? amount.toFixed(2) : ""}" placeholder="0.00" required></label>
-      <div class="field"><span>How?</span>${segButtons("settle-method", METHODS.map((m) => [m, m === "Bank Transfer" ? "Bank" : m]), "Twint")}</div>
-      <button class="btn primary" type="submit">Save payback</button>
+      <div class="field"><span>How?</span>${segButtons("settle-method", METHODS.map((m) => [m, m === "Bank Transfer" ? "Bank" : m]), method || "Twint")}</div>
+      <button class="btn primary" type="submit" disabled data-arm>Continue</button>
       <button class="btn" type="button" data-action="close-sheet">Cancel</button>
     </form>`);
+  armButtons();
 }
 
-async function submitSettle(form) {
+// Buttons marked data-arm only become tappable a moment after they appear,
+// so the tap that opened a sheet (or a quick double-tap) can't press them.
+function armButtons(delay = 600) {
+  setTimeout(() => document.querySelectorAll(".sheet [data-arm]").forEach((b) => { b.disabled = false; }), delay);
+}
+
+// Step 2 of recording a payback: nothing is saved until this is confirmed.
+function confirmSettleSheet(body) {
+  S.pendingSettle = body;
+  openSheet(`<h2>Confirm payback</h2>
+    <div class="card row" style="gap:12px">
+      <span class="pair">${avatar(body.from_roommate, "sm")}${avatar(body.to_roommate, "sm")}</span>
+      <div class="grow"><b>${esc(body.from_roommate)} paid ${esc(body.to_roommate)}</b>
+        <div class="muted small">via ${esc(body.method)}</div></div>
+      <div class="amount" style="font-size:1.2rem">${chf(body.amount)}</div>
+    </div>
+    <p class="muted small" style="margin:10px 4px 14px">This is saved to the Google Sheet and changes everyone's balances.</p>
+    <div class="stack">
+      <button class="btn primary" data-action="confirm-settle" disabled data-arm>Yes, record ${chf(body.amount)}</button>
+      <button class="btn" data-action="settle-back">Back</button>
+    </div>`);
+  armButtons(1000);
+}
+
+function submitSettle(form) {
   const sheet = form.closest(".sheet");
   const val = (name) => sheet.querySelector(`.seg button.on[data-name="${name}"]`)?.dataset.value;
   const body = { from_roommate: val("settle-from"), to_roommate: val("settle-to"), amount: parseMoney(form.amount.value), method: val("settle-method") };
   if (body.from_roommate === body.to_roommate) return toast("Choose two different people.", true);
   if (!(body.amount > 0)) return toast("Enter an amount above 0.", true);
-  const button = form.querySelector("button[type=submit]");
+  confirmSettleSheet(body);
+}
+
+async function saveSettlement(button) {
+  const body = S.pendingSettle;
+  if (!body) return;
   button.disabled = true;
   button.innerHTML = `<span class="spinner sm"></span> Saving…`;
   try {
     await api("/api/settlements", { method: "POST", body });
+    S.pendingSettle = null;
     closeSheet();
     toast(`${body.from_roommate} paid ${body.to_roommate} ${chf(body.amount)} ✓`);
     await load(true);
   } catch (err) {
     toast(err.message, true);
     button.disabled = false;
-    button.textContent = "Save payback";
+    button.textContent = `Yes, record ${chf(body.amount)}`;
   }
 }
 
@@ -938,7 +969,12 @@ document.addEventListener("click", async (e) => {
   else if (a === "refresh") { load(true); }
   else if (a === "refresh-now") { await load(true); toast("Up to date ✓"); }
   else if (a === "logout") { logout(); }
-  else if (a === "close-sheet") { closeSheet(); }
+  else if (a === "close-sheet") { closeSheet(); S.pendingSettle = null; }
+  else if (a === "confirm-settle") { saveSettlement(el); }
+  else if (a === "settle-back") {
+    const b = S.pendingSettle;
+    settleSheet({ from: b?.from_roommate, to: b?.to_roommate, amount: b?.amount, method: b?.method });
+  }
   else if (a === "settle") { settleSheet({ from: el.dataset.from, to: el.dataset.to, amount: el.dataset.amount ? Number(el.dataset.amount) : undefined }); }
   else if (a === "receipts-month" || a === "stats-month") {
     const key = a === "stats-month" ? "statsMonth" : null;
