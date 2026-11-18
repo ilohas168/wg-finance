@@ -13,7 +13,7 @@ const CATEGORIES = ["Food", "Drink", "Toiletries", "Household", "General"];
 const METHODS = ["Twint", "Bank Transfer", "Cash"];
 const REFRESH_AFTER_MS = 60_000;
 // Shown in Settings so you can check the phone runs the latest version.
-const APP_VERSION = "12";
+const APP_VERSION = "13";
 
 const S = {
   token: localStorage.getItem("wg.token"),
@@ -490,6 +490,8 @@ function addScreen() {
         <span><div class="t">Scan a receipt</div><div class="d">Take a photo — the items are read for you.</div></span></button>
       <button class="big-choice" data-action="pick-photo"><span class="emoji">🖼️</span>
         <span><div class="t">Choose a photo</div><div class="d">Use a receipt picture from your gallery.</div></span></button>
+      <button class="big-choice" data-action="new-typed"><span class="emoji">⌨️</span>
+        <span><div class="t">Type a receipt by hand</div><div class="d">Several items, each for whoever it's for.</div></span></button>
       <button class="big-choice" data-action="new-manual"><span class="emoji">✍️</span>
         <span><div class="t">Payment without receipt</div><div class="d">E.g. cutlery, a deposit, a Twint payment.</div></span></button>
       <button class="big-choice" data-action="settle"><span class="emoji">💸</span>
@@ -565,6 +567,25 @@ async function startScan(file) {
   }
 }
 
+// A receipt typed in by hand: as many items as needed, each with its own
+// "for whom". The total adds itself up from the items until it is edited.
+function newTypedDraft(firstItem) {
+  return {
+    mode: "receipt", id: null, store: "", date: todayISO(), payer: S.data.me || ROOMMATES[0],
+    total: 0, header_discount: 0, notes: "", manual: true, typed: true, autoTotal: true,
+    items: [firstItem || { name: "", category: "General", qty: 1, line_total: "", beneficiary: "ALL" }],
+  };
+}
+
+function syncAutoTotal() {
+  const d = S.draft;
+  if (!d || !d.autoTotal) return;
+  const sum = d.items.reduce((acc, i) => acc + cents(i.line_total), 0) - cents(d.header_discount);
+  d.total = (sum / 100).toFixed(2);
+  const input = document.querySelector('[data-draft="total"]');
+  if (input && document.activeElement !== input) input.value = d.total;
+}
+
 function newManualDraft() {
   return {
     mode: "manual", id: null, store: "", date: todayISO(), payer: S.data.me || ROOMMATES[0],
@@ -615,20 +636,23 @@ function editorScreen() {
         <label class="field"><span>Shared between</span>${selectHtml('data-draft="beneficiary"', FOR_OPTIONS, d.beneficiary)}</label>
         <label class="field"><span>Category</span>${selectHtml('data-draft="category"', CATEGORIES.map((c) => [c, c]), d.category)}</label>
         <label class="field"><span>Note (optional)</span><input class="input" data-draft="notes" value="${esc(d.notes)}"></label>
+        <button class="btn ghost" type="button" data-action="manual-to-items">+ Split into several items (e.g. some for me, some for others)</button>
       </div>
       <div class="check-bar" id="check-bar"></div>`;
   }
   return `<button class="back" data-action="cancel-edit">‹ Cancel</button>
-    ${topbar(d.id ? "Edit receipt" : "Check receipt", d.fromScan ? "Read from your photo — please check the amounts." : "")}
+    ${topbar(d.id ? "Edit receipt" : d.typed ? "New receipt" : "Check receipt",
+      d.fromScan ? "Read from your photo — please check the amounts."
+        : d.typed ? "Add each item and choose who it's for." : "")}
     <div class="stack">
       <label class="field"><span>Store</span><input class="input" data-draft="store" value="${esc(d.store)}"></label>
       <div class="grid-2">
         <label class="field"><span>Date</span><input class="input" type="date" data-draft="date" value="${esc(d.date)}"></label>
-        <label class="field"><span>Total on receipt</span><input class="input money" inputmode="decimal" data-draft="total" value="${esc(money2(d.total))}"></label>
+        <label class="field"><span>${d.autoTotal ? "Total (adds up itself)" : "Total on receipt"}</span><input class="input money" inputmode="decimal" data-draft="total" value="${esc(money2(d.total))}"></label>
       </div>
       <div class="field"><span>Paid by</span>${payer}</div>
     </div>
-    <div class="section-title">Items (${d.items.length})</div>
+    <div class="section-title">Items (<span id="item-count">${d.items.length}</span>)</div>
     <div id="items">${d.items.map(itemCard).join("")}</div>
     <button class="btn ghost" data-action="add-item" style="margin-top:6px">+ Add item</button>
     <details class="card" style="margin-top:10px"><summary class="muted">More: receipt discount & note</summary>
@@ -643,7 +667,7 @@ function itemCard(item, i) {
   return `<div class="item-card" data-index="${i}">
     <div class="top">
       <input class="input" data-item="${i}" data-field="name" value="${esc(item.name)}" placeholder="Item name">
-      <input class="input money" inputmode="decimal" data-item="${i}" data-field="line_total" value="${esc(money2(item.line_total))}">
+      <input class="input money" inputmode="decimal" data-item="${i}" data-field="line_total" value="${esc(money2(item.line_total))}" placeholder="0.00" aria-label="Amount in CHF">
     </div>
     <div class="bottom">
       ${selectHtml(`data-item="${i}" data-field="beneficiary" aria-label="Who is it for"`, FOR_OPTIONS, item.beneficiary)}
@@ -679,6 +703,8 @@ function updateCheckBar() {
   const bar = document.getElementById("check-bar");
   const d = S.draft;
   if (!bar || !d) return;
+  const count = document.getElementById("item-count");
+  if (count) count.textContent = d.items.length;
   const items = draftItems(d);
   const itemsCents = items.reduce((s, i) => s + cents(i.line_total), 0) - cents(d.header_discount);
   const gap = itemsCents - cents(d.total);
@@ -696,7 +722,9 @@ function updateCheckBar() {
 
 async function saveDraft(button) {
   const d = S.draft;
-  const items = draftItems(d).map((i) => ({ ...i, line_total: parseMoney(i.line_total), qty: Number(i.qty) || 1 }));
+  const items = draftItems(d)
+    .map((i) => ({ ...i, line_total: parseMoney(i.line_total), qty: Number(i.qty) || 1 }))
+    .filter((i) => i.name.trim() || i.line_total !== 0); // skip untouched blank rows
   if (!d.store.trim()) return toast(d.mode === "manual" ? "Say what it was for." : "Enter the store name.", true);
   if (d.mode === "manual" && !(parseMoney(d.total) > 0)) return toast("Enter an amount above 0.", true);
   if (!items.length) return toast("Add at least one item.", true);
@@ -996,11 +1024,16 @@ document.addEventListener("click", async (e) => {
   else if (a === "pick-photo") { document.getElementById(el.dataset.capture ? "photo-camera" : "photo-gallery").click(); }
   else if (a === "cancel-scan") { S.scan = null; location.hash = "#/add"; }
   else if (a === "retry-scan") { if (S.scan) startScan(S.scan.file); }
-  else if (a === "scan-to-manual") {
-    S.scan = null;
-    S.draft = { mode: "receipt", id: null, store: "", date: todayISO(), payer: S.data.me || ROOMMATES[0], total: 0, header_discount: 0, notes: "",
-      items: [{ name: "", category: "General", qty: 1, line_total: 0, beneficiary: "ALL" }] };
-    location.hash = "#/editor";
+  else if (a === "scan-to-manual") { S.scan = null; S.draft = newTypedDraft(); location.hash = "#/editor"; }
+  else if (a === "new-typed") { S.draft = newTypedDraft(); location.hash = "#/editor"; }
+  else if (a === "manual-to-items") {
+    // Keep what was typed in the single-payment form as the first item.
+    const d = S.draft;
+    const draft = newTypedDraft({ name: d.store, category: d.category, qty: 1, line_total: d.total || "", beneficiary: d.beneficiary });
+    Object.assign(draft, { store: d.store, date: d.date, payer: d.payer, notes: d.notes });
+    S.draft = draft;
+    syncAutoTotal();
+    render();
   }
   else if (a === "new-manual") { S.draft = newManualDraft(); location.hash = "#/editor"; }
   else if (a === "cancel-edit") { S.draft = null; history.length > 1 ? history.back() : (location.hash = "#/home"); }
@@ -1010,14 +1043,16 @@ document.addEventListener("click", async (e) => {
     if (el.dataset.name === "stats-scope") { S.statsScope = el.dataset.value; render(); }
   }
   else if (a === "add-item") {
-    S.draft.items.push({ name: "", category: "General", qty: 1, line_total: 0, beneficiary: "ALL" });
+    S.draft.items.push({ name: "", category: "General", qty: 1, line_total: "", beneficiary: "ALL" });
     document.getElementById("items").insertAdjacentHTML("beforeend", itemCard(S.draft.items.at(-1), S.draft.items.length - 1));
     document.querySelector(`[data-item="${S.draft.items.length - 1}"][data-field="name"]`)?.focus();
+    syncAutoTotal();
     updateCheckBar();
   }
   else if (a === "remove-item") {
     S.draft.items.splice(Number(el.dataset.index), 1);
     document.getElementById("items").innerHTML = S.draft.items.map(itemCard).join("");
+    syncAutoTotal();
     updateCheckBar();
   }
   else if (a === "save-draft") { saveDraft(el); }
@@ -1048,9 +1083,12 @@ document.addEventListener("input", (e) => {
   if (!S.draft) return;
   if (t.dataset.draft) {
     S.draft[t.dataset.draft] = t.value;
+    if (t.dataset.draft === "total") S.draft.autoTotal = false; // typed by hand: stop auto-summing
+    if (t.dataset.draft === "header_discount") syncAutoTotal();
     updateCheckBar();
   } else if (t.dataset.item !== undefined) {
     S.draft.items[Number(t.dataset.item)][t.dataset.field] = t.value;
+    if (t.dataset.field === "line_total") syncAutoTotal();
     updateCheckBar();
   }
 });
