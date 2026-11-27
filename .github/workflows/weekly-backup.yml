@@ -1,0 +1,23 @@
+# Weekly backup of the ledger into the "wg-finance-backups" Google Sheet.
+# It only calls the app's backup endpoint (api/index.py -> /api/cron/backup),
+# which skips if a backup from the last six days already exists.
+# Run it by hand from the Actions tab with "Run workflow".
+name: Weekly backup
+
+on:
+  schedule:
+    - cron: "23 2 * * 1" # Mondays 02:23 UTC
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger the backup
+        env:
+          APP_URL: ${{ vars.APP_URL || 'https://wg-finance.vercel.app' }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+               --retry 3 --retry-delay 30 --retry-all-errors \
+               --max-time 90 "$APP_URL/api/cron/backup"

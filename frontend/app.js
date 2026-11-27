@@ -13,7 +13,7 @@ const CATEGORIES = ["Food", "Drink", "Toiletries", "Household", "General"];
 const METHODS = ["Twint", "Bank Transfer", "Cash"];
 const REFRESH_AFTER_MS = 60_000;
 // Shown in Settings so you can check the phone runs the latest version.
-const APP_VERSION = "13";
+const APP_VERSION = "14";
 
 const S = {
   token: localStorage.getItem("wg.token"),
@@ -247,6 +247,7 @@ function render() {
   app.innerHTML = `<main class="screen">${screen}</main>${nav(activeTab)}${
     S.offline ? `<div class="offline pill warn">Offline — showing saved data</div>` : ""}`;
   if (r.name === "editor") updateCheckBar();
+  if (r.name === "settings") loadBackupStatus();
 }
 
 function renderRefreshing() {
@@ -963,6 +964,24 @@ function statsScreen() {
 // Settings                                                                   //
 // ------------------------------------------------------------------------- //
 
+function backupLabel(title) {
+  if (!title) return "none yet";
+  const iso = title.replace("Backup ", "");
+  return dayLabel(iso);
+}
+
+async function loadBackupStatus() {
+  const el = document.getElementById("backup-status");
+  if (!el) return;
+  try {
+    const res = await api("/api/backup");
+    el.innerHTML = `Latest backup: <b>${esc(backupLabel(res.backups[0]))}</b>` +
+      ` · <a href="${esc(res.sheet_url)}" target="_blank" rel="noopener">open backups</a>`;
+  } catch (err) {
+    el.textContent = err.message;
+  }
+}
+
 function settingsScreen() {
   const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
   const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
@@ -979,6 +998,13 @@ function settingsScreen() {
       <input class="input" type="password" name="new" placeholder="New password (min. 6 characters)" autocomplete="new-password" minlength="6" required>
       <button class="btn" type="submit">Update password</button>
     </form>
+    <div class="section-title">Backups</div>
+    <div class="card stack" id="backup-card">
+      <div class="small">Every week a full copy of all receipts, items and paybacks is saved to the
+        Google Sheet <b>wg-finance-backups</b> (the last 8 weeks are kept).</div>
+      <div class="small muted" id="backup-status">Checking the latest backup…</div>
+      <button class="btn" data-action="backup-now">💾 Back up now</button>
+    </div>
     <div class="section-title">Data</div>
     <p class="muted small" style="margin:0 4px 8px">App version ${APP_VERSION}</p>
     <button class="btn" data-action="refresh-now">↻ Reload from Google Sheets</button>
@@ -997,6 +1023,18 @@ document.addEventListener("click", async (e) => {
   else if (a === "refresh") { load(true); }
   else if (a === "refresh-now") { await load(true); toast("Up to date ✓"); }
   else if (a === "logout") { logout(); }
+  else if (a === "backup-now") {
+    el.disabled = true;
+    el.innerHTML = `<span class="spinner sm"></span> Backing up…`;
+    try {
+      const res = await api("/api/backup", { method: "POST" });
+      const c = res.counts || {};
+      toast(`Backup saved ✓ (${c.Receipts ?? 0} receipts, ${c.Settlements ?? 0} paybacks)`);
+      loadBackupStatus();
+    } catch (err) { toast(err.message, true); }
+    el.disabled = false;
+    el.textContent = "💾 Back up now";
+  }
   else if (a === "close-sheet") { closeSheet(); S.pendingSettle = null; }
   else if (a === "confirm-settle") { saveSettlement(el); }
   else if (a === "settle-back") {
