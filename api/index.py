@@ -525,6 +525,62 @@ def add_settlement(body: SettlementIn, user: dict = Depends(current_user)) -> di
     return {"id": settlement_id}
 
 
+# --------------------------------------------------------------------------- #
+# Backups (see app/services/backup.py)                                         #
+# --------------------------------------------------------------------------- #
+
+def _backup_target():
+    from app.services.backup import backup_sheet_id
+
+    try:
+        return ledger._get_gspread_client().open_by_key(backup_sheet_id())
+    except Exception as exc:
+        if ledger.is_rate_limited(exc):
+            raise ledger.SheetsBusyError("busy") from exc
+        logger.exception("Cannot open the backup sheet")
+        raise HTTPException(
+            status_code=503,
+            detail="Can't open the backup sheet. Make sure 'wg-finance-backups' is shared "
+            "with the app's service account as Editor.",
+        )
+
+
+def _do_backup(force: bool) -> dict[str, Any]:
+    from app.services.backup import run_backup
+
+    return run_backup(ledger._open_sheet(), _backup_target(), force=force)
+
+
+@router.get("/cron/backup")
+def scheduled_backup() -> dict[str, Any]:
+    """Weekly backup, called by a GitHub Actions schedule.
+
+    It needs no login: it only copies the ledger into the owner's own backup
+    sheet, does nothing if the last backup is less than six days old, and
+    returns no ledger data.
+    """
+    result = _do_backup(force=False)
+    return {"created": result["created"], "skipped": result["skipped"], "latest": (result["backups"] or [None])[0]}
+
+
+@router.post("/backup")
+def backup_now(user: dict = Depends(current_user)) -> dict[str, Any]:
+    result = _do_backup(force=True)
+    return {"created": result["created"], "counts": result.get("counts", {}), "backups": result["backups"]}
+
+
+@router.get("/backup")
+def backup_status(user: dict = Depends(current_user)) -> dict[str, Any]:
+    from app.services.backup import list_backups
+
+    from app.services.backup import backup_sheet_id
+
+    return {
+        "backups": list_backups(_backup_target()),
+        "sheet_url": f"https://docs.google.com/spreadsheets/d/{backup_sheet_id()}/edit",
+    }
+
+
 app.include_router(router, prefix="/api")
 app.include_router(router)
 

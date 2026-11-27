@@ -60,3 +60,20 @@ The Streamlit dashboard (`dashboard.py`) keeps working on the same sheet, so
 both can run side by side. Once everyone uses the phone app, delete the app
 on share.streamlit.io and remove `streamlit` and `plotly` from
 `requirements.txt` to make the Vercel function smaller and faster to start.
+
+## Backups
+
+Every Monday a GitHub Actions schedule (`.github/workflows/weekly-backup.yml`)
+calls `/api/cron/backup`, which copies the Receipts, Receipt_Items and
+Settlements tabs into a new `Backup YYYY-MM-DD` tab of the Google Sheet
+**wg-finance-backups** (the last 8 are kept). Settings → **Back up now** makes
+one at any time and shows the latest backup.
+
+- The backup sheet is owned by a person and shared with the app's service
+  account as **Editor** (service accounts can't own Drive files). Its ID is the
+  default in `app/services/backup.py`; set `BACKUP_SHEET_ID` to use another.
+- If the app does not run at `https://wg-finance.vercel.app`, set a repository
+  variable `APP_URL` (GitHub → Settings → Secrets and variables → Actions).
+- **Restoring:** each backup tab has one block per ledger tab, starting with a
+  `### <tab>` row followed by that tab's header and rows. Copy a block (without
+  the `###` row) back into the matching tab of the ledger sheet.
